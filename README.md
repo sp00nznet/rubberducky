@@ -46,8 +46,9 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | Synthetic vblank / flip | **Running** | 60 Hz host timer thread drives the GCM FIFO drain + present |
 | Guest heap | **Working** | dlmalloc's arena never backs (MORECORE unimplemented) → the 5 public allocators are overridden with a bump allocator (`src/rd_malloc.cpp`); the game's own debug malloc now returns real addresses |
 | Reaches renderer | **Working** | past CRT/module init into `dmaCmd`, the demo's GPU command-submission path |
-| Raw-SPU command DMA | **Blocked** | the demo drives GPU submission on a **raw SPU via MMIO**; with no SPU execution `dmaCmd`'s completion poll spins (current wall, below) |
-| First frame | Not yet | gated by the raw-SPU wall below |
+| Raw-SPU MFC proxy DMA | **Working** | `sys_raw_spu_mmio_write/_read` overridden (`src/rd_spu.cpp`): DMAs execute as memcpy in the flat VM, proxy tag-status reports complete |
+| Raw-SPU code execution | **Blocked** | after the DMAs the demo sets NPC + RunCntl and runs an actual SPU program, polling SPU_Status for its stop code — needs an SPU execution core (current wall, below) |
+| First frame | Not yet | gated by the raw-SPU execution wall below |
 
 ### What Works Now
 
@@ -57,12 +58,17 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 - **SPU + graphics bring-up** — SPU subsystem initialises; the demo prints its `debugrsx` banner and the D3D12 backend opens a 1280×720 window with depth buffer and all three primitive-class pipelines ready.
 - **Working guest heap** — the demo's dlmalloc arena never gets backing memory (its MORECORE/sbrk isn't emulated), so all five public allocators (`malloc`/`free`/`calloc`/`realloc`/`memalign` at `0x00396D14`–`0x00396DE8`) are redirected to a bump allocator over `0x11000000`–`0x40000000` via `tools/post_lift.py`. The game's own debug malloc now reports real addresses, and the null-object vtable dispatch is gone.
 - **Reaches its renderer** — boot now runs through CRT + module init into `dmaCmd` (`_Z6dmaCmdiiijyj`), the GPU command-submission path.
+- **Raw-SPU MFC proxy DMA** — the demo drives Cell "AsyncCopy" by programming a raw SPU's MFC via problem-state MMIO. `src/rd_spu.cpp` overrides `sys_raw_spu_mmio_write/_read` to model the MFC command queue: DMAs execute synchronously as bounds-checked `memcpy` in the flat VM (SPU local store at `0xE0000000 + id*0x100000`), and the proxy tag-status reports complete so `waitForDmaTransfer` falls through. Verified with sane DMAs (GET, correct LS/EA/size).
 - **VFS wired** — game data resolves under `/dev_hdd0/game/NPEA00003/USRDIR/` (junction into `input/USRDIR`).
 - **Named everything** — because this is a debug build, every lifted function, every watchdog RVA, and every crash chain resolves to a real symbol. The current spin symbolised in seconds: `dmaCmd` → `sys_raw_spu_mmio_write`/`_read` + `_jsYieldThread`.
 
 ### Known Issues
 
-- **Raw-SPU command DMA wall (current blocker).** The demo submits GPU work through a **raw SPU driven by MMIO**, not through the plain GCM FIFO. `dmaCmd` loads a command program into SPU local store and pokes the problem-state registers via `sys_raw_spu_mmio_write(id, off, val)`, which resolves to guest address `0xE0040000 + id*0x100000 + off`. It then polls `sys_raw_spu_mmio_read` (yielding via `_jsYieldThread`) for the SPU to signal completion. Our flat VM makes those MMIO writes land in RAM silently and never runs the SPU, so the status never flips and the poll spins forever (last HLE call stays `cellSysmoduleLoadModule`; the main thread loops in `dmaCmd+0x7CF`). Getting past this needs real raw-SPU emulation — MMIO register model + MFC DMA + either executing the lifted `.spu_image` (152 KB, extractable via ps3recomp's `spu_lifter`) or a PPU-side fallback for the demo's async-copy job. This is the next milestone.
+- **Raw-SPU code-execution wall (current blocker).** The demo drives GPU work through a **raw SPU**, not the plain GCM FIFO. The full problem-state protocol is now reverse-engineered (symbol-named debug build made this tractable):
+  1. `dmaCmd` issues MFC proxy DMAs (regs `0x3004` LSA / `0x3008` EAH / `0x300C` EAL / `0x3010` size+tag / `0x3014` class+cmd) and `waitForDmaTransfer` polls tag-status `0x3104`. **This is emulated and working** (`src/rd_spu.cpp`).
+  2. It then writes `SPU_NPC` (`0x4034`) and `SPU_RunCntl` (`0x401C = 1`) to **run an actual SPU program**, and polls `SPU_Status` (`0x4014`), extracting the STOP-and-signal code (bits 16–23) and reading the out-mailbox (`0x400C`). Our flat VM never executes the SPU, so the status/stop-code never appears and the poll spins.
+
+  Getting past step 2 needs a **raw-SPU execution core**: run the lifted `.spu_image` (5 embedded SPU ELFs, 152 KB total, already extracted to `spu/` via ps3recomp's `extract_spu_images.py`; liftable with `spu_lifter.py`) with a 256 KB local store, SPU channels, SPU-side MFC DMA, and STOP/mailbox signalling wired back to the problem-state registers. This is the single biggest remaining subsystem — comparable to an emulator's SPU core — and is the next milestone. A stub that fakes the stop code was considered and rejected: the game consumes the SPU's mailbox output and DMA'd results, so faking would not produce a correct frame.
 - **`sys_heap_malloc` returns a host pointer.** `libs/system/sysPrxForUser.c`'s `sys_heap_malloc` / `sys_heap_memalign` return a raw host `malloc()` pointer instead of a guest EA into `vm_base`. Not on this demo's critical path (it uses statically-linked dlmalloc, now overridden), but it will bite any title that does — flagged upstream for ps3recomp.
 - **2 unresolved cellSysutil NIDs** — `0x887572D5`, `0xE558748D`. Imported but not yet in ps3recomp's cellSysutil; they return the default HLE stub (0). Impact TBD.
 - **1 unimplemented lv2 syscall** — syscall `160`, hit once during graphics init; currently a no-op stub.
@@ -192,6 +198,10 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.3.0 — Raw-SPU MFC proxy DMA; SPU-execution wall mapped (2026-07-15)
+- **MFC proxy DMA emulated.** Reverse-engineered the demo's raw-SPU problem-state protocol from the symbol-named `dmaCmd` / `doDma` / `waitForDmaTransfer` and overrode `sys_raw_spu_mmio_write/_read` (`src/rd_spu.cpp`, patched in by `tools/post_lift.py`). MFC DMA commands now execute synchronously as bounds-checked `memcpy` in the flat VM (LS at `0xE0000000 + id*0x100000`); the proxy tag-status reports complete so the DMA-wait poll falls through. Verified: the first async-copy DMAs run with correct direction/LS/EA/size.
+- **Next wall precisely mapped.** Past the DMAs, the demo sets `SPU_NPC`/`SPU_RunCntl` and executes an actual SPU program, polling `SPU_Status` for a STOP-and-signal code + out-mailbox output. This needs a full raw-SPU execution core (the 5 embedded `.spu_image` ELFs are extracted to `spu/`). Documented in Known Issues as the next milestone; a fake-completion stub was rejected as it can't produce a correct frame.
 
 ### v0.2.0 — Past the heap wall, into the renderer (2026-07-15)
 - **Guest heap fixed.** Root-caused the `malloc → 0` wall: the demo statically links dlmalloc (mspace variant) whose arena is created lazily via a MORECORE/sbrk that recomp doesn't back, so the arena pointer at `TOC+0x1108` stays null. Rather than replicate the OS heap init, the five public allocators are overridden with a bump allocator (`src/rd_malloc.cpp`) at guest `0x11000000`, injected into the lifted code by a reproducible `tools/post_lift.py`.

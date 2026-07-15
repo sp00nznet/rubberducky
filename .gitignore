@@ -40,3 +40,7 @@ Thumbs.db
 # build helpers
 build_game.exit
 build_cfg.log
+
+# Extracted SPU images (derived from your own ELF; regenerate via extract_spu_images.py)
+spu/
+run*.log

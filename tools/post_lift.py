@@ -19,13 +19,18 @@ import glob, os, re, sys
 
 RECOMP_DIR = os.path.join(os.path.dirname(__file__), "..", "src", "recomp")
 
-# guest addr -> (override symbol, human name)
+# guest addr -> (override symbol, human name). Redirect the lifted wrapper body
+# to a host HLE implementation. See src/rd_malloc.cpp and src/rd_spu.cpp.
 ALLOC_PATCHES = {
-    "00396DE8": ("rd_hle_malloc",   "malloc"),
-    "00396DBC": ("rd_hle_free",     "free"),
-    "00396D84": ("rd_hle_calloc",   "calloc"),
-    "00396D4C": ("rd_hle_realloc",  "realloc"),
-    "00396D14": ("rd_hle_memalign", "memalign"),
+    # dlmalloc public allocators -> bump allocator (src/rd_malloc.cpp)
+    "00396DE8": ("rd_hle_malloc",         "malloc"),
+    "00396DBC": ("rd_hle_free",           "free"),
+    "00396D84": ("rd_hle_calloc",         "calloc"),
+    "00396D4C": ("rd_hle_realloc",        "realloc"),
+    "00396D14": ("rd_hle_memalign",       "memalign"),
+    # raw-SPU MFC proxy DMA -> synchronous memcpy + tag-complete (src/rd_spu.cpp)
+    "003A7CAC": ("rd_hle_spu_mmio_write", "sys_raw_spu_mmio_write"),
+    "003A7D00": ("rd_hle_spu_mmio_read",  "sys_raw_spu_mmio_read"),
 }
 
 
@@ -46,7 +51,7 @@ def patch_file(path):
             while j < len(lines) and lines[j].rstrip("\n") != "}":
                 j += 1
             out.append(f"void func_{addr}(ppu_context* ctx) {{\n")
-            out.append(f"    /* rd-patched: {name} -> bump allocator (src/rd_malloc.cpp) */\n")
+            out.append(f"    /* rd-patched: {name} -> {sym} (host HLE) */\n")
             out.append(f"    extern void {sym}(ppu_context* ctx); {sym}(ctx);\n")
             out.append("}\n")
             n_patched += 1
@@ -60,13 +65,21 @@ def patch_file(path):
 
 
 def main():
-    total, want = 0, len(ALLOC_PATCHES)
+    # Count functions that end up patched (idempotent: already-patched count too).
+    present = 0
     for path in glob.glob(os.path.join(RECOMP_DIR, "ppu_recomp_*.cpp")):
-        total += patch_file(path)
-    print(f"post_lift: patched {total}/{want} allocator functions")
-    if total != want:
-        print("  WARNING: expected 5 (malloc/free/calloc/realloc/memalign); "
-              "re-lift may have changed addresses", file=sys.stderr)
+        patch_file(path)
+        with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
+            txt = f.read()
+        for addr in ALLOC_PATCHES:
+            if f"func_{addr}(ppu_context* ctx) {{\n    /* rd-patched" in txt:
+                present += 1
+    want = len(ALLOC_PATCHES)
+    print(f"post_lift: {present}/{want} target functions patched "
+          f"(5 dlmalloc allocators + 2 raw-SPU MMIO)")
+    if present != want:
+        print("  WARNING: a target wasn't found; re-lift may have changed addresses",
+              file=sys.stderr)
         return 1
     return 0
 
