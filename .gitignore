@@ -47,3 +47,5 @@ run*.log
 
 # Lifted SPU images (derived from your own ELF; regenerate via spu_lifter.py)
 src/spu_gen/
+
+spu_trace.txt
