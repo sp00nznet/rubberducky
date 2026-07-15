@@ -44,8 +44,10 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | SPU subsystem init | **Working** | `[SPU] initialize(nspu=6, nrawspu=1)` |
 | D3D12 backend | **Working** | device (FL 11.0), D24S8 depth, triangle/line/point PSOs, 112 KB VB, window @1280×720 |
 | Synthetic vblank / flip | **Running** | 60 Hz host timer thread drives the GCM FIFO drain + present |
-| Guest heap | **Blocked** | game's internal malloc returns `0x00000000` — backing pool never initialised |
-| First frame | Not yet | gated by the heap wall below |
+| Guest heap | **Working** | dlmalloc's arena never backs (MORECORE unimplemented) → the 5 public allocators are overridden with a bump allocator (`src/rd_malloc.cpp`); the game's own debug malloc now returns real addresses |
+| Reaches renderer | **Working** | past CRT/module init into `dmaCmd`, the demo's GPU command-submission path |
+| Raw-SPU command DMA | **Blocked** | the demo drives GPU submission on a **raw SPU via MMIO**; with no SPU execution `dmaCmd`'s completion poll spins (current wall, below) |
+| First frame | Not yet | gated by the raw-SPU wall below |
 
 ### What Works Now
 
@@ -53,12 +55,15 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 - **Boots into real game code** — CRT initialises TLS, sets up `argv` (`/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN`), and dispatches the entry OPD into recompiled PowerPC.
 - **Module loader** — the game's `cellSysmoduleLoadModule` sequence runs: NET, SYSUTIL_NP, USBD, JPGDEC, RESC.
 - **SPU + graphics bring-up** — SPU subsystem initialises; the demo prints its `debugrsx` banner and the D3D12 backend opens a 1280×720 window with depth buffer and all three primitive-class pipelines ready.
-- **Named everything** — because this is a debug build, every lifted function, every watchdog RVA, and every crash chain resolves to a real symbol (e.g. the async-copy assert points straight at `spu_memcpy_elf`).
+- **Working guest heap** — the demo's dlmalloc arena never gets backing memory (its MORECORE/sbrk isn't emulated), so all five public allocators (`malloc`/`free`/`calloc`/`realloc`/`memalign` at `0x00396D14`–`0x00396DE8`) are redirected to a bump allocator over `0x11000000`–`0x40000000` via `tools/post_lift.py`. The game's own debug malloc now reports real addresses, and the null-object vtable dispatch is gone.
+- **Reaches its renderer** — boot now runs through CRT + module init into `dmaCmd` (`_Z6dmaCmdiiijyj`), the GPU command-submission path.
+- **VFS wired** — game data resolves under `/dev_hdd0/game/NPEA00003/USRDIR/` (junction into `input/USRDIR`).
+- **Named everything** — because this is a debug build, every lifted function, every watchdog RVA, and every crash chain resolves to a real symbol. The current spin symbolised in seconds: `dmaCmd` → `sys_raw_spu_mmio_write`/`_read` + `_jsYieldThread`.
 
 ### Known Issues
 
-- **Guest heap wall (current blocker).** The demo's very first allocation — its own debug `malloc` (`"Allocating malloc memory (aligned at %d bytes): %d bytes allocated at %p"`) — returns `0x00000000`. It fires *before* any `sys_memory_allocate` / `sys_mmapper` / `sys_heap_create` call (none appear in the boot log), so the allocator is an **internal static pool** whose base is read back as zero — i.e. the pool-init static constructor either hasn't run or its BSS write isn't landing where the reader expects. Every object then lands at address 0, and the first C++ virtual dispatch reads a garbage vtable → `unresolved indirect call -> 0x004A41F8` (`obj = 0x4C0120`, the module TOC, mis-read as an object). Resolving the heap init is the gateway to the first frame.
-- **`sys_heap_malloc` returns a host pointer.** `libs/system/sysPrxForUser.c`'s `sys_heap_malloc` / `sys_heap_memalign` return a raw host `malloc()` pointer instead of a guest EA into `vm_base`. Not on this demo's critical path (it doesn't call `sys_heap`), but it will bite any title that does — flagged upstream for ps3recomp.
+- **Raw-SPU command DMA wall (current blocker).** The demo submits GPU work through a **raw SPU driven by MMIO**, not through the plain GCM FIFO. `dmaCmd` loads a command program into SPU local store and pokes the problem-state registers via `sys_raw_spu_mmio_write(id, off, val)`, which resolves to guest address `0xE0040000 + id*0x100000 + off`. It then polls `sys_raw_spu_mmio_read` (yielding via `_jsYieldThread`) for the SPU to signal completion. Our flat VM makes those MMIO writes land in RAM silently and never runs the SPU, so the status never flips and the poll spins forever (last HLE call stays `cellSysmoduleLoadModule`; the main thread loops in `dmaCmd+0x7CF`). Getting past this needs real raw-SPU emulation — MMIO register model + MFC DMA + either executing the lifted `.spu_image` (152 KB, extractable via ps3recomp's `spu_lifter`) or a PPU-side fallback for the demo's async-copy job. This is the next milestone.
+- **`sys_heap_malloc` returns a host pointer.** `libs/system/sysPrxForUser.c`'s `sys_heap_malloc` / `sys_heap_memalign` return a raw host `malloc()` pointer instead of a guest EA into `vm_base`. Not on this demo's critical path (it uses statically-linked dlmalloc, now overridden), but it will bite any title that does — flagged upstream for ps3recomp.
 - **2 unresolved cellSysutil NIDs** — `0x887572D5`, `0xE558748D`. Imported but not yet in ps3recomp's cellSysutil; they return the default HLE stub (0). Impact TBD.
 - **1 unimplemented lv2 syscall** — syscall `160`, hit once during graphics init; currently a no-op stub.
 - **`JS_ASSERT … spu_memcpy_elf failed`** — the async-copy path expects a working SPU ELF copy; downstream of the heap wall.
@@ -100,6 +105,10 @@ python $R/tools/ppu_lifter.py input/EBOOT.elf \
        --hle-stubs meta/EBOOT.imports.json \
        --code-end  0x40c080 \
        --output    src/recomp
+
+# 4b. Post-lift patches (idempotent): redirect the 5 dlmalloc public allocators
+#     to the bump allocator in src/rd_malloc.cpp
+python tools/post_lift.py
 
 # 5. Build the runtime library (once) and the game (clang-cl + Ninja)
 cmake -S $R -B $R/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -150,8 +159,11 @@ rubberducky/
 ├── input/                  # your own EBOOT.elf + USRDIR assets (gitignored)
 ├── meta/                   # analysis outputs (committed): loader/imports/
 │                           #   image/functions/symbols/names JSON
+├── tools/
+│   └── post_lift.py        # idempotent post-lift patches (allocator override)
 └── src/
     ├── boot_main.cpp       # ps3recomp boot harness, rebranded for this title
+    ├── rd_malloc.cpp       # guest heap override (bump allocator)
     ├── compat/             # <dirent.h>/<unistd.h> Win32 shims
     ├── gen/                # generated HLE NID table (committed)
     └── recomp/             # 105 MB lifted C++ (gitignored; regenerate)
@@ -180,6 +192,12 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.2.0 — Past the heap wall, into the renderer (2026-07-15)
+- **Guest heap fixed.** Root-caused the `malloc → 0` wall: the demo statically links dlmalloc (mspace variant) whose arena is created lazily via a MORECORE/sbrk that recomp doesn't back, so the arena pointer at `TOC+0x1108` stays null. Rather than replicate the OS heap init, the five public allocators are overridden with a bump allocator (`src/rd_malloc.cpp`) at guest `0x11000000`, injected into the lifted code by a reproducible `tools/post_lift.py`.
+- **Null-object dispatch gone.** With real allocations, the `unresolved indirect call -> 0x004A41F8` (null-vtable) is resolved and the earlier `spu_memcpy_elf` assert clears.
+- **Reaches the GPU submission path.** Boot now runs into `dmaCmd`, where the true rendering wall lives: the demo drives a **raw SPU via MMIO** (`0xE0040000 + id*0x100000 + off`) and spins polling for SPU completion. Precisely diagnosed (see Known Issues); next milestone is raw-SPU emulation.
+- **VFS wired** to `/dev_hdd0/game/NPEA00003/USRDIR/`.
 
 ### v0.1.0 — First Boot (2026-07-15)
 - Carved the plaintext ELF from the fake-SELF EBOOT; full loader/import/symbol analysis.

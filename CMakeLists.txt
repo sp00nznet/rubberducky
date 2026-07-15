@@ -29,6 +29,7 @@ file(GLOB GEN_SOURCES    "src/gen/*.cpp")
 
 add_executable(rubberducky
     "${CMAKE_CURRENT_SOURCE_DIR}/src/boot_main.cpp"      # boot harness (rebranded)
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/rd_malloc.cpp"      # guest heap override (bump)
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"        # vm + ELF loader + run
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_hle.cpp"           # NID -> handler dispatch
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_sysprx.cpp"        # boot-critical CRT
