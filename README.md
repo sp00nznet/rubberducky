@@ -50,8 +50,11 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | Raw-SPU code execution | **Working** | the lifted SPU (`spu_0004`) runs as an async host-thread worker with live mailbox exchange; the AsyncCopy ready-handshake completes and the game leaves init |
 | Natural cellGcmInit | **Working** | the game's own `_cellGcmInitBody` fires (cmdbuf, ioAddr `0x11100000`); `cellGcmSys` Init + SetGraphicsHandler run |
 | FIFO sync (cellGcmFinish) | **Working** | SET_REFERENCE + control-register get/ref now advance as the RSX drains, so `cellGcmFinish` completes |
-| RSX FIFO init | **In progress** | `_jsGcmFifoInit` waits on a GCM reference-sync (`control->ref`); forcing it through reaches `SetFlipHandler`/`SetFlipMode` (flip setup) — the correct ref protocol is the current wall |
-| First frame | Not yet | one ref-sync + first-draw away — flip setup is reached when the ref-wait is forced |
+| RSX FIFO init | **Working** | `process_fifo` now walks the FIFO ring following JUMPs (drain to `control->put`), so the FIFO-init reference-sync completes |
+| Video-out config | **Working** | `cellVideoOutGetState`/`GetResolution`/`Configure` registered → 1280×720; render-target dimensions valid |
+| PSGL device init | **Working** | flip handlers set, `SetFlipMode`, tiles/zcull — device init passes |
+| PSGL GL context | **Blocked** | the PSGL rendering context (`LContext`) is NULL — context creation fails (a mid-function indirect call `_jsGcmSetTarget+0x9C` is unresolved); cascading asserts → abort (current wall) |
+| First frame | Not yet | gated by PSGL context creation |
 
 ### What Works Now
 
@@ -211,6 +214,11 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.7.0 — FIFO walk + video-out; into PSGL context creation (2026-07-15)
+- **FIFO ring walk.** `_jsGcmFifoInit` waited on a reference the RSX never wrote because the game submits via `control->put` and builds the FIFO as a **ring of JUMP commands**, while the drain read `context->current` and processed linearly. Rewrote `cellGcm_rsx_process_fifo` to walk get→put following type-1 JUMPs — the reference-sync now completes.
+- **Video-out resolution.** The demo's `cellVideoOutGetState`/`GetResolution`/`Configure` imports were unresolved → 0×0 render target → PSGL device asserts. Registered `cellVideoOut`; `GetResolution → 1280×720`, RT dimensions valid, device init passes (flip handlers, `SetFlipMode`, tiles).
+- **Now at:** PSGL GL-context creation — `LContext` is NULL (a mid-function indirect call `_jsGcmSetTarget+0x9C` is unresolved), the current wall. The game marches through the entire graphics device/texture/framebuffer/matrix/raster/fragment setup before it.
 
 ### v0.6.0 — Natural GCM init + FIFO sync; into RSX FIFO setup (2026-07-15)
 - **cellGcmFinish completes.** Root-caused the graphics-init spin: the RSX command parser ignored **NV406E_SET_REFERENCE** (FIFO method `0x50`), so the control register's `ref` never advanced and `cellGcmFinish` (which the game's `_jsGcmInitRM` calls) polled it forever. Added SET_REFERENCE → `control->ref`, and made the FIFO processor advance `control->get` as it drains (both in ps3recomp's `cellGcmSys`/`rsx_commands`).
