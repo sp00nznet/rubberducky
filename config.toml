@@ -1,0 +1,42 @@
+# ps3recomp configuration — Rubber Ducky "Bigduck" Tech Demo (NPEA00003)
+#
+# Sony PhyreEngine-era E3 2006 tech demo, distributed as a PSN sample. Single
+# self-contained EBOOT (no .sprx modules), ET_EXEC — the image loads verbatim
+# at its fixed vaddr, no relocations. Debug build: ships a full .symtab + DWARF,
+# so every lifted function carries its real name as a comment.
+
+[input]
+elf_path = "input/EBOOT.elf"
+title    = "Rubber Ducky Tech Demo (Bigduck Sample)"
+title_id = "NPEA00003"
+
+[loader]
+# from meta/EBOOT.loader.json
+entry_opd  = 0x4a51d8
+entry_code = 0x10230
+entry_toc  = 0x4c0120
+module_toc = 0x4c0120
+opd_base   = 0x4a51c8
+opd_count  = 9707
+code_end   = 0x40c080   # end of .sceStub.text; .eh_frame onward is data
+
+# Firmware imports: 90 NIDs across 6 libraries (all HLE-covered by ps3recomp).
+# "hle" = real host backend, "stub" = return CELL_OK / no-op until proven needed.
+[modules]
+cellGcmSys    = "hle"   # 36 — RSX command buffer / state -> D3D12 backend
+cellResc      = "hle"   # 17 — resolution conversion / scale-and-flip (720p only)
+sys_io        = "hle"   # 15 — pad input (cellPad*, mapped to XInput)
+sysPrxForUser = "hle"   # 15 — TLS, lwmutex/lwcond, heap, threads, libc
+cellSysutil   = "hle"   #  5 — callbacks, system params, video-out config
+cellSysmodule = "hle"   #  2 — module load/unload tracking
+
+[graphics]
+backend = "d3d12"
+width   = 1280          # demo only supports 720p
+height  = 720
+vsync   = "on"
+
+[debug]
+log_hle_calls          = true
+log_missing_nids       = true
+break_on_unimplemented = false
