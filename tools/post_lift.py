@@ -33,6 +33,7 @@ ALLOC_PATCHES = {
     "003A7D00": ("rd_hle_spu_mmio_read",  "sys_raw_spu_mmio_read"),
     # memset with a watchpoint on the jsGcmFifo (src/rd_malloc.cpp)
     "00391E30": ("rd_hle_memset",         "memset"),
+    "003A12EC": ("rd_hle_unwind_resume",  "_Unwind_Resume"),
 }
 
 

@@ -111,3 +111,16 @@ void rd_hle_memset(ppu_context* ctx)
     }
     /* ctx->gpr[3] already = dst (memset returns dst) */
 }
+
+/* _Unwind_Resume neutralized. The lifter reaches a cleanup landing-pad's
+ * _Unwind_Resume on a NORMAL execution path (verified: NONE of __cxa_throw /
+ * _Unwind_RaiseException / __cxa_allocate_exception / terminate ever run, and
+ * the exception-object arg is 0xFFFFFFFF = no exception in flight). So the real
+ * _Unwind_Resume "resumes" a nonexistent exception -> terminate() -> abort() ->
+ * sys_process_exit(1), killing DuckApp::onInit before the frame loop. Making it
+ * a no-op lets the (already-run) cleanup fall through, so onInit completes and
+ * the demo proceeds into its SPU render pipeline.
+ * ponytail: neutralizes a spurious lift-EH unwind; the real fix is landing-pad
+ * control flow in spu_lifter/ppu_lifter. Safe here because the title never
+ * raises a real C++ exception (confirmed by the EH-entrypoint taps). */
+void rd_hle_unwind_resume(ppu_context* ctx) { (void)ctx; }
