@@ -62,39 +62,18 @@ REG_PRESERVE_PATCHES = [
     # loops forever (with _Unwind_Resume no-op'd). Force the result to 0 so
     # onInit takes the success path into startSpuThreadSimple/initGraphics.
     (
-        "        func_001CF704(ctx); DRAIN_TRAMPOLINE(ctx);\n"
+        "func_001CF704(ctx); DRAIN_TRAMPOLINE(ctx);\n"
         "        /* nop */;\n"
         "        { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0;",
-        "        func_001CF704(ctx); DRAIN_TRAMPOLINE(ctx);\n"
+        "func_001CF704(ctx); DRAIN_TRAMPOLINE(ctx);\n"
         "        ctx->gpr[3] = 0; /* rd-ehfix: SpuPrintfServer::init spurious-throw -> force success */\n"
         "        /* nop */;\n"
         "        { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0;",
         "rd-ehfix: SpuPrintfServer::init spurious-throw -> force success",
     ),
-    (
-        "        ctx->gpr[3] = ctx->gpr[0] | ctx->gpr[0];\n"
-        "        func_0013DB20(ctx); DRAIN_TRAMPOLINE(ctx);\n"
-        "        /* nop */;\n",
-        "        ctx->gpr[3] = ctx->gpr[0] | ctx->gpr[0];\n"
-        "        /* rd-regfix: preserve nonvolatiles across _jsPlatformCreateDevice */\n"
-        "        { uint64_t _r28=ctx->gpr[28],_r29=ctx->gpr[29],_r31=ctx->gpr[31];\n"
-        "          func_0013DB20(ctx); DRAIN_TRAMPOLINE(ctx);\n"
-        "          ctx->gpr[28]=_r28; ctx->gpr[29]=_r29; ctx->gpr[31]=_r31; }\n"
-        "        /* nop */;\n",
-        "rd-regfix: preserve nonvolatiles across _jsPlatformCreateDevice",
-    ),
-    (
-        "        vm_write32(ctx->gpr[31] + 0x14, ctx->gpr[3]);\n"
-        "        func_000359C4(ctx); DRAIN_TRAMPOLINE(ctx);\n",
-        "        vm_write32(ctx->gpr[31] + 0x14, ctx->gpr[3]);\n"
-        "        /* rd-regfix: preserve nonvolatiles + device local across psglCreateContext */\n"
-        "        { uint64_t _s31=ctx->gpr[31],_s30=ctx->gpr[30],_s29=ctx->gpr[29],_s28=ctx->gpr[28];\n"
-        "          uint32_t _dev=vm_read32(ctx->gpr[31]+0x14);\n"
-        "          func_000359C4(ctx); DRAIN_TRAMPOLINE(ctx);\n"
-        "          ctx->gpr[31]=_s31; ctx->gpr[30]=_s30; ctx->gpr[29]=_s29; ctx->gpr[28]=_s28;\n"
-        "          vm_write32(ctx->gpr[31]+0x14,_dev); }\n",
-        "rd-regfix: preserve nonvolatiles + device local across psglCreateContext",
-    ),
+    # (The v0.9.0 device-creation nonvolatile wraps were removed: the ppu_lifter
+    # callee-save scratch-slot fix eliminated the r31/stack corruption they
+    # mitigated — device creation now succeeds without them.)
 ]
 
 
