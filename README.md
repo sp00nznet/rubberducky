@@ -225,6 +225,11 @@ This project contains no proprietary Sony code, game binaries, encryption keys, 
 
 ## Changelog
 
+### v0.16.0 — Correction: the VBO-name OOM is real but not the blocker (2026-07-15)
+- **Guarded `glBindBuffer` against absurd names and the `GL_OUT_OF_MEMORY` disappeared — but the demo still spins on the same global (`0x006714F0`).** So the garbage-VBO-name OOM, while a genuine corruption bug, does **not** gate rendering. The real wall is an independent wait.
+- **Mesh objects are static globals** (`0x671xxx`, the spin address lives in this region). For the main mesh path the VBO names are actually valid (dumped `1,2,3,4,5,…`); the garbage only appears when a bind reads a field whose `glGenBuffers` was skipped (gated by per-mesh flag bytes, or the multi-LOD `[mesh+0x58]>=2` path), leaving a stale stack address.
+- **Now at (revised):** identify the `0x006714F0` spin — the main thread waits on a static mesh-region global (a heap pointer) to change, right after input init (`cellMouseInit`). It is not VBO-related. The VBO-name guard is a valid mitigation to carry once the real wall is understood. **The demo still does not render its own content.**
+
 ### v0.15.0 — Traced the OOM wall to garbage VBO names in the demo's mesh code (2026-07-15)
 - **Full root-cause chain for the `GL_OUT_OF_MEMORY` wall.** The PSGL buffer name-space at `LContext+0x16AC` is correctly initialised (capacity 16). It grows to a garbage capacity only because `_jsTexNameSpaceCreateNameLazy` is asked to fit **garbage buffer names** — stack addresses (`0x0FEFF910`), a `GL_DYNAMIC_DRAW` enum (`0x88E8`), an image address (`0x0041B228`).
 - **The garbage names come from the demo itself.** `glBindBuffer(GL_ARRAY_BUFFER, name)` is called by **`TsimpleMesh::createVBO()`**, reading each `name` from the mesh object's VBO-name array at `meshObject+0x74`. `glGenBuffers` writes *valid* small IDs into that same array, yet the bind loop reads a **stack address** back out — and since the bump heap zeroes allocations, that address was actively written there, not left uninitialised.
