@@ -56,8 +56,10 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | Fifo survives to render | **Working** | fixed a `memset` that zeroed the initialized `jsGcmFifo` (it sits at device+0x14 inside a 512-byte struct the game clears); guarded via the memset override |
 | First RSX draw command | **Working** | the demo emits a `CLEAR_SURFACE` the RSX parser processes (`mask=0x10 color=0x0`) — first game-issued RSX command |
 | FIFO reference-sync | **Working** | drain FIFO every ~1ms (not only 60Hz) so `_jsGcmFifoFinish`'s reference-wait passes; `JSGcmFifo.cpp:142` now transient |
-| PSGL device creation completes | **Blocked** | `LContext` stays NULL → `onInit` graphics setup fails → EH unwind → terminate → `abort` → `sys_process_exit(1)` (current wall) |
-| First frame (demo content) | Not yet | gated by PSGL device creation completing; **the demo does not yet render its own content** |
+| PSGL device creation completes | **Working** | fixed frameless-cascade `r31`/stack-slot corruption around `_jsPlatformCreateDevice` + `psglCreateContext`; device+context+`MakeCurrent` succeed, `LContext` non-NULL |
+| Graphics init without aborting | **Working** | full PSGL bring-up runs with **zero asserts / no `exit(1)`** |
+| SPURS/task worker dispatch | **Blocked** | `q1-worker` thread dispatches a null vtable (`cia=0x004AFEA8`) — the async render-task runtime (current wall) |
+| First frame (demo content) | Not yet | gated by the worker runtime running the render tasks; **the demo does not yet render its own content** |
 
 ### What Works Now
 
@@ -217,6 +219,12 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.9.0 — PSGL device creation fixed; demo runs into its task runtime (2026-07-15)
+- **The systemic root: frameless-cascade register/stack corruption.** Traced the demo's `abort → exit(1)` all the way down: `DuckApp::onInit` unwound because `psglMakeCurrent` got a **null device**, because `psglCreateDeviceExtended` returned null even though `_jsPlatformCreateDevice` succeeded (returned `CELL_OK`). The cause is a recompiler frameless-cascade bug — a deeply-nested callee stores above its own frame and clobbers an ancestor's saved-register slot / locals. Two concrete victims: `r31` (frame pointer) is corrupted `0x0FEFFA60 → 0x1` across `_jsPlatformCreateDevice` (so Extended reads the wrong stack slot and returns `[0x1+0x74]=0`), and the caller's saved device pointer at `[r31+0x14]` is overwritten with `0` across `psglCreateContext`.
+- **Targeted fix (persisted in `post_lift.py`).** Snapshot the affected nonvolatiles (and the one clobbered stack local) around those two calls and restore them after — ABI-correct, since callees must preserve `r14–r31`. With this, `psglCreateDeviceExtended` returns the real device (`0x11210000`), `psglMakeCurrent(device, context)` gets two valid pointers, `_jsPlatformMakeCurrent` runs, and **`LContext` is no longer NULL**.
+- **Result: no more abort.** The demo clears graphics init with **zero assertion failures** and no `exit(1)` — a full run of the PSGL device/context/make-current path that previously aborted. It now advances into its **SPURS/task worker runtime**.
+- **Now at:** a `q1-worker` task thread dispatches a **null vtable** (`ARG[…] vtbl=0x0 → method 0x0`, `cia=0x004AFEA8`) — the async worker system that would run the render tasks. No `DRAW` commands emitted yet. **The demo does not yet render its own content.** `ponytail:` the register/stack wraps are per-call-site mitigations for a systemic lifter bug (real fix is frame isolation), but they cleanly unblock device creation.
 
 ### v0.8.0 — First RSX draw command; the fifo-clobber root fix (2026-07-15)
 - **The fifo was initialized correctly, then wiped.** Bisected the PSGL device-creation crash to a single memory-lifecycle bug: `_jsGcmFifoInit` correctly initializes the `jsGcmFifo` @ `0x68C474` (`dmaControl=0x0F7FFFE0`, `pushBuffer=0x111BF000`) and it survives to `_jsGcmInitFromRM`'s return — but a `memset(0x68C460, 0, 512)` that clears the enclosing 512-byte device struct (the fifo sits at device+0x14) then zeroes it, so `_jsGcmFifoGlSetRenderTarget` reads a NULL fifo and aborts through a null callback. Found it by overriding the guest `memset` (0x00391E30) with a watchpoint on the fifo range.

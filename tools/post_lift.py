@@ -36,6 +36,65 @@ ALLOC_PATCHES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Nonvolatile-register / caller-frame preservation around the PSGL device and
+# context creators.
+#
+# The recompiler's frameless-cascade model lets a deeply-nested callee store
+# above its own frame and clobber an ancestor's saved-register slot / locals.
+# During PSGL bring-up this corrupts r31 (frame pointer) across
+# _jsPlatformCreateDevice (func_0013DB20) and clobbers the caller's saved device
+# pointer at [r31+0x14] across psglCreateContext (func_000359C4) — so
+# psglCreateDeviceExtended returns a null device and psglMakeCurrent gets a null
+# device, leaving LContext NULL and aborting the demo.
+#
+# These two wraps snapshot the affected nonvolatiles (and the one clobbered
+# stack local) around those calls and restore them after — ABI-correct, since
+# callees must preserve r14-r31. Targeted mitigations for the systemic bug; the
+# real fix is frame isolation in the lifter. Each is a unique call site.
+REG_PRESERVE_PATCHES = [
+    # (find, replace, tag) — applied once each, idempotent via the tag check.
+    (
+        "        ctx->gpr[3] = ctx->gpr[0] | ctx->gpr[0];\n"
+        "        func_0013DB20(ctx); DRAIN_TRAMPOLINE(ctx);\n"
+        "        /* nop */;\n",
+        "        ctx->gpr[3] = ctx->gpr[0] | ctx->gpr[0];\n"
+        "        /* rd-regfix: preserve nonvolatiles across _jsPlatformCreateDevice */\n"
+        "        { uint64_t _r28=ctx->gpr[28],_r29=ctx->gpr[29],_r31=ctx->gpr[31];\n"
+        "          func_0013DB20(ctx); DRAIN_TRAMPOLINE(ctx);\n"
+        "          ctx->gpr[28]=_r28; ctx->gpr[29]=_r29; ctx->gpr[31]=_r31; }\n"
+        "        /* nop */;\n",
+        "rd-regfix: preserve nonvolatiles across _jsPlatformCreateDevice",
+    ),
+    (
+        "        vm_write32(ctx->gpr[31] + 0x14, ctx->gpr[3]);\n"
+        "        func_000359C4(ctx); DRAIN_TRAMPOLINE(ctx);\n",
+        "        vm_write32(ctx->gpr[31] + 0x14, ctx->gpr[3]);\n"
+        "        /* rd-regfix: preserve nonvolatiles + device local across psglCreateContext */\n"
+        "        { uint64_t _s31=ctx->gpr[31],_s30=ctx->gpr[30],_s29=ctx->gpr[29],_s28=ctx->gpr[28];\n"
+        "          uint32_t _dev=vm_read32(ctx->gpr[31]+0x14);\n"
+        "          func_000359C4(ctx); DRAIN_TRAMPOLINE(ctx);\n"
+        "          ctx->gpr[31]=_s31; ctx->gpr[30]=_s30; ctx->gpr[29]=_s29; ctx->gpr[28]=_s28;\n"
+        "          vm_write32(ctx->gpr[31]+0x14,_dev); }\n",
+        "rd-regfix: preserve nonvolatiles + device local across psglCreateContext",
+    ),
+]
+
+
+def apply_reg_preserve(path):
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
+        txt = f.read()
+    n = 0
+    for find, repl, tag in REG_PRESERVE_PATCHES:
+        if tag in txt:
+            n += 1; continue                                 # already applied
+        if find in txt:
+            txt = txt.replace(find, repl, 1); n += 1
+    with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
+        f.write(txt)
+    return n
+
+
 def patch_file(path):
     with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
         lines = f.readlines()
@@ -69,17 +128,21 @@ def patch_file(path):
 def main():
     # Count functions that end up patched (idempotent: already-patched count too).
     present = 0
+    reg_applied = 0
     for path in glob.glob(os.path.join(RECOMP_DIR, "ppu_recomp_*.cpp")):
         patch_file(path)
+        reg_applied += apply_reg_preserve(path)
         with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
             txt = f.read()
         for addr in ALLOC_PATCHES:
             if f"func_{addr}(ppu_context* ctx) {{\n    /* rd-patched" in txt:
                 present += 1
     want = len(ALLOC_PATCHES)
+    want_reg = len(REG_PRESERVE_PATCHES)
     print(f"post_lift: {present}/{want} target functions patched "
-          f"(5 dlmalloc allocators + 2 raw-SPU MMIO)")
-    if present != want:
+          f"(5 dlmalloc allocators + 2 raw-SPU MMIO), "
+          f"{reg_applied}/{want_reg} reg-preserve wraps")
+    if present != want or reg_applied != want_reg:
         print("  WARNING: a target wasn't found; re-lift may have changed addresses",
               file=sys.stderr)
         return 1
