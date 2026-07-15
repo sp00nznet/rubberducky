@@ -59,9 +59,11 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | PSGL device creation completes | **Working** | fixed frameless-cascade `r31`/stack-slot corruption around `_jsPlatformCreateDevice` + `psglCreateContext`; device+context+`MakeCurrent` succeed, `LContext` non-NULL |
 | Graphics init without aborting | **Working** | full PSGL bring-up runs with **zero asserts / no `exit(1)`** |
 | `onInit` completes (no exit) | **Working** | neutralized a spurious `_Unwind_Resume` that was quitting the app; onInit runs into its SPU setup |
-| SPU render pipeline runs | **Partial** | raw-SPU DMA runs; onInit reaches SPU thread-group creation but spins — an indirect call through an uninitialized object is no-op'd, so the group never starts |
-| Scene geometry (`demo_draw`) | **Blocked** | `demo_draw` (PPU-side GL) not yet reached; gated on the SPU groups starting + the uninitialized-dispatch-object root |
-| First frame (demo content) | Not yet | **the demo does not yet render its own content** (now runs its pipeline instead of aborting) |
+| Boot blocker isolated | **Done** | after graphics init the main thread spins on `sys_event_flag_wait(flag=30)` → ESRCH; **event flag 30 is never created** (it's the stubbed SPU/SPURS completion signal). `YDKJ_F100_OK=1` breaks the spin and advances the guest into GCM FIFO submission |
+| GCM FIFO submission reached | **Working** | past the flag-30 spin the guest calls `cellGcmGetControlRegister` and drives the jsGcm FIFO reference handshake (RSX `ref` @ `0x0F800028`) |
+| SPU render pipeline runs | **Blocked** | the demo's SPU init doesn't execute (SPU/SPURS stubbed). Confirmed via `RD_FIFO_DBG`: with the flag-30 wait force-skipped, the FIFO holds a **stack address (`0x0FEFFA30`) instead of a valid `SET_REFERENCE`** — so the ref-sync never converges. The SPU workloads (lifted `spu_0000`–`0003`) must actually run |
+| Scene geometry (`demo_draw`) | **Blocked** | not reached; gated on the SPU pipeline producing valid FIFO/state |
+| First frame (demo content) | Not yet | **the demo does not yet render its own content** — the D3D12 window opens and presents cleared frames, but `demo_draw` is never reached |
 
 ### What Works Now
 
@@ -221,6 +223,12 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.13.0 — Boot blocker isolated: the never-created SPU event flag (2026-07-15)
+- **Pinned the exact guest boot blocker.** After the full graphics init, the main thread spins forever on `sys_event_flag_wait(flag=30)`, which returns `ESRCH` because **event flag 30 is never created** — no `flag_create` for it appears anywhere, and no other PPU thread creates it. It's the completion signal the stubbed SPU/SPURS subsystem would raise. (The D3D12 window itself opens regardless — the vblank-ticker host thread initialises the backend at boot — but the *guest* never gets past this wait.)
+- **Broke the spin to see what's behind it.** The shared runtime's `YDKJ_F100_OK=1` shim (returns `CELL_OK` for a wait on an inactive flag) advances the guest past flag 30 into real GCM work: it calls `cellGcmGetControlRegister` and drives the jsGcm FIFO reference handshake, spinning on the RSX `ref` register at `0x0F800028`.
+- **Confirmed the SPU pipeline is the real gate — with hard data.** Added an env-gated `RD_FIFO_DBG` trace to `cellGcm_rsx_process_fifo`. With the SPU-completion wait force-skipped, the demo submits only 8 FIFO bytes and they are `00000000 0FEFFA30` — a NOP header plus a **stack address**, not a valid `SET_REFERENCE` command. So the reference-sync can never converge: force-skipping the SPU init leaves the state that builds the FIFO uninitialised. `_jsGcmFifoReadReference` (`func_000907FC`) reads its wait target from `[[fifo+0x10]+0x48]` and the loop compares it to `ctrl->ref` — a value the demo never validly queued.
+- **Now at:** the SPU-driven initialisation must actually run (register the lifted `spu_0000`–`0003` workloads + wire the `cellSpurs` HLE dispatch; this title does not load `libsre`, so it's the HLE-dispatch route rather than a lifted SPURS kernel). A recurring clue for next session: the same stack address `0x0FEFFA30` leaks into *both* the bogus event-flag "pattern" and the FIFO data — worth tracing as a possible residual data-corruption bug before committing to the full SPU build-out. **The demo does not yet render its own content.**
 
 ### v0.12.0 — ppu_lifter callee-save/rlwinm fix + assets loading (2026-07-15)
 - **Integrated the ppu_lifter fix that made You Don't Know Jack render.** The lifter (a) mistook a frame slot reused as scratch for a callee-save pair (rewriting reloads to stale register snapshots → data corruption) and (b) sign-extended `rlwinm`/`rlwimi` instead of zero-extending, corrupting 64-bit compares and pointer math. This was the *root* of the register/stack corruption the v0.9.0 nonvolatile wraps mitigated — **device creation now succeeds without them** (the two `rd-regfix` wraps are removed; only the `SpuPrintfServer` `rd-ehfix` remains).
