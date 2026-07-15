@@ -53,8 +53,10 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | RSX FIFO init | **Working** | `process_fifo` now walks the FIFO ring following JUMPs (drain to `control->put`), so the FIFO-init reference-sync completes |
 | Video-out config | **Working** | `cellVideoOutGetState`/`GetResolution`/`Configure` registered → 1280×720; render-target dimensions valid |
 | PSGL device init | **Working** | flip handlers set, `SetFlipMode`, tiles/zcull — device init passes |
-| PSGL GL context | **Blocked** | the PSGL rendering context (`LContext`) is NULL — context creation fails (a mid-function indirect call `_jsGcmSetTarget+0x9C` is unresolved); cascading asserts → abort (current wall) |
-| First frame | Not yet | gated by PSGL context creation |
+| Fifo survives to render | **Working** | fixed a `memset` that zeroed the initialized `jsGcmFifo` (it sits at device+0x14 inside a 512-byte struct the game clears); guarded via the memset override |
+| First RSX draw command | **Working** | the demo emits a `CLEAR_SURFACE` the RSX parser processes (`mask=0x10 color=0x0`) — first game-issued RSX command |
+| PSGL device creation completes | **Blocked** | `cellGcmAddressToOffset` handed a null local-mem buffer in `_jsGcmFifoFinish`; ref-sync assert (`JSGcmFifo.cpp:142`); `LContext` stays NULL → `sys_process_exit(1)` (current wall) |
+| First frame (demo content) | Not yet | gated by PSGL device creation completing; **the demo does not yet render its own content** |
 
 ### What Works Now
 
@@ -214,6 +216,12 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.8.0 — First RSX draw command; the fifo-clobber root fix (2026-07-15)
+- **The fifo was initialized correctly, then wiped.** Bisected the PSGL device-creation crash to a single memory-lifecycle bug: `_jsGcmFifoInit` correctly initializes the `jsGcmFifo` @ `0x68C474` (`dmaControl=0x0F7FFFE0`, `pushBuffer=0x111BF000`) and it survives to `_jsGcmInitFromRM`'s return — but a `memset(0x68C460, 0, 512)` that clears the enclosing 512-byte device struct (the fifo sits at device+0x14) then zeroes it, so `_jsGcmFifoGlSetRenderTarget` reads a NULL fifo and aborts through a null callback. Found it by overriding the guest `memset` (0x00391E30) with a watchpoint on the fifo range.
+- **Targeted guard.** The memset override now preserves the fifo's 68 bytes when a clear would clobber an already-initialized (non-zero) fifo. `ponytail:` a guard on a known aliasing clear, not a lift-ordering fix — but it confirms the blocker and unblocks the render path.
+- **Result — first pixels of the pipeline.** With the fifo intact the demo now marches into PSGL device creation and **emits a real `CLEAR_SURFACE` command that the RSX parser processes** (`mask=0x10 color=0x0`) — the first game-issued RSX draw command in the project. The bump allocator is confirmed in use (heap objects at `0x11000000+` flow through the GCM calls).
+- **Now at:** PSGL device creation still doesn't complete — `cellGcmAddressToOffset` is handed a null buffer inside `_jsGcmFifoFinish`, the fifo reference-sync assert (`JSGcmFifo.cpp:142`) fires, `LContext` stays NULL, and the game exits with code 1. The remaining chain centres on local video-memory (`0xC0000000`) buffers coming back null. **The demo does not yet render its own content.**
 
 ### v0.7.0 — FIFO walk + video-out; into PSGL context creation (2026-07-15)
 - **FIFO ring walk.** `_jsGcmFifoInit` waited on a reference the RSX never wrote because the game submits via `control->put` and builds the FIFO as a **ring of JUMP commands**, while the drain read `context->current` and processed linearly. Rewrote `cellGcm_rsx_process_fifo` to walk get→put following type-1 JUMPs — the reference-sync now completes.

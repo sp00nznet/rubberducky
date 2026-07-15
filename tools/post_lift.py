@@ -31,6 +31,8 @@ ALLOC_PATCHES = {
     # raw-SPU MFC proxy DMA -> synchronous memcpy + tag-complete (src/rd_spu.cpp)
     "003A7CAC": ("rd_hle_spu_mmio_write", "sys_raw_spu_mmio_write"),
     "003A7D00": ("rd_hle_spu_mmio_read",  "sys_raw_spu_mmio_read"),
+    # memset with a watchpoint on the jsGcmFifo (src/rd_malloc.cpp)
+    "00391E30": ("rd_hle_memset",         "memset"),
 }
 
 

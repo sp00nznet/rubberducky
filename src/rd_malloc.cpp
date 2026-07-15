@@ -75,3 +75,39 @@ void rd_hle_realloc(ppu_context* ctx)     /* realloc(ptr, size) */
 }
 
 void rd_hle_free(ppu_context* ctx) { (void)ctx; }   /* bump: no-op */
+
+/* memset(dst, c, n) with a watchpoint on the jsGcmFifo @ 0x68C474 (68 bytes).
+ * Something zeroes that fifo between _jsGcmInitFromRM and SetRenderTarget; log
+ * the call whose range covers it so we can find the culprit. */
+static const uint32_t RD_FIFO = 0x68C474u;   /* jsGcmFifo @ device+0x14 */
+static const uint32_t RD_FIFO_LEN = 68u;
+
+void rd_hle_memset(ppu_context* ctx)
+{
+    uint32_t dst = (uint32_t)ctx->gpr[3];
+    int      c   = (int)(uint32_t)ctx->gpr[4];
+    uint32_t n   = (uint32_t)ctx->gpr[5];
+
+    /* The device struct @ 0x68C460 embeds the jsGcmFifo at +0x14. The game
+     * clears the whole 512-byte device with a memset that runs *after* the
+     * fifo was already initialized (order the lift preserves but that leaves
+     * the fifo zeroed by the time SetRenderTarget reads it). If a memset would
+     * clobber an already-initialized (non-zero) fifo, preserve those 68 bytes.
+     * ponytail: targeted guard on a known aliasing clear; real fix is the lift
+     * ordering, but this confirms/unblocks the render path. */
+    bool covers = dst <= RD_FIFO && RD_FIFO < (uint64_t)dst + n;
+    uint8_t saved[RD_FIFO_LEN];
+    bool restore = false;
+    if (covers && vm_base && c == 0) {
+        memcpy(saved, vm_base + RD_FIFO, RD_FIFO_LEN);
+        for (uint32_t i = 0; i < RD_FIFO_LEN; ++i)
+            if (saved[i]) { restore = true; break; }
+    }
+    if (vm_base && n) memset(vm_base + dst, c, n);
+    if (restore) {
+        memcpy(vm_base + RD_FIFO, saved, RD_FIFO_LEN);
+        fprintf(stderr, "[rd_dbg] memset 0x%08X n=%u would clobber live fifo -> preserved\n",
+                dst, n);
+    }
+    /* ctx->gpr[3] already = dst (memset returns dst) */
+}
