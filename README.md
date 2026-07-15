@@ -225,6 +225,12 @@ This project contains no proprietary Sony code, game binaries, encryption keys, 
 
 ## Changelog
 
+### v0.19.0 — Cg shader wall root-caused to a lifter frame-slot collision; a fix advances it (2026-07-15)
+- **Root cause confirmed.** The "Invalid program handle" is a `ppu_lifter` frame-slot collision: in `_jsCgCreateProgram`, the slot holding the freshly-created CGprogram name (`1`) is **clobbered to `25` by `_jsPlatformGenerateVertexProgram`** — the slot is reused as scratch/output across that call. The function then returns the corrupted handle, so `cgGetNamedParameter` rejects it. Proven by probing the slot before/after each callee.
+- **A targeted fix works.** Saving the correct name right after it's created and restoring it at the return **advanced the demo from the abort at `cg_particlefluid.cpp:98` to `:115`** — confirming the diagnosis. The same clobber also corrupts the context and fragment-program handles, so the clean fix is in the lifter's frame-slot allocation (per-handle save/restore is whack-a-mole).
+- **Reliability fix (committed):** `sys_event_flag_wait` now yields on the `ESRCH` path, making `cellGcmFinish`'s misrouted-`usleep` busy-wait cooperative so the demo reliably reaches the Cg stage (it was timing-flaky before).
+- **Now at:** fix the `ppu_lifter` frame-slot collision (extend the v0.12 slot heuristic to exclude slots read after an intervening call), which unblocks all Cg shader handles → shader binding → `demo_draw`. **The demo does not yet render its own content** — but the last root cause is now pinned, with a demonstrated fix.
+
 ### v0.18.0 — AsyncCopy bypass: demo loads ALL assets + shaders, reaches Cg shader creation (2026-07-15)
 - **Breakthrough.** Overriding `_jsAsyncCopy` with a synchronous host `memcpy` (and no-op'ing `_jsAsyncCopyFinish`) bypasses the raw-SPU AsyncCopy program's infinite loop that hung the texture upload. The demo now uploads the duck texture **and all its mipmaps**, then loads **duckgreen, the full environment cubemap, and the particle-fluid Cg shader** — reaching Cg vertex-program creation. The SPU worker still runs for the AsyncCopy init handshake (`RD_SPU_NORUN=1` regresses further back).
 - **New wall: Cg shader creation fails.** `cgCreateProgramFromFile` on the deprecated-format `.vpo` returns an invalid program handle → `g_paramModelViewProjection` assertion → abort. Chain: `initShaders → cParticleFluidLoadShader → cgCreateProgramFromFile → … → _jsGcmGenerateProgram → _jsCreatePushBuffer`.
