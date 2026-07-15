@@ -225,6 +225,12 @@ This project contains no proprietary Sony code, game binaries, encryption keys, 
 
 ## Changelog
 
+### v0.17.0 — The real wall: raw-SPU AsyncCopy texture upload (SPU *is* on the render path) (2026-07-15)
+- **The `gDuckTexture` spin was a false positive.** It's the texture object's dest-buffer pointer, read as a loop invariant ~1M times by the bounded RGB→RGBA pixel-conversion loop in `TsimpleTexture::load` (512×512 = 262144 iterations) — enough to trip the hot-poll detector, but the loop completes.
+- **The true stuck point, pinned via a spin-backtrace (built with `/OPT:NOICF` for reliable symbols):** the main thread is in `_jsRawRasterToImage → _jsVMXCopyWithPrealloc → fast_memcpy → _jsAsyncCopy → _jsAsyncCopyFinish`. `fast_memcpy` delegates the 1 MB texture copy to the **raw-SPU AsyncCopy**, and a SPU worker thread is running the AsyncCopy program (`spu_func_000000E0`) — but it never signals completion, so `_jsAsyncCopyFinish` waits forever.
+- **Correction to v0.14: the SPU *is* on the render path.** `RD_SPU_NORUN=1` (disabling SPU execution) gets *less* far (stalls at module load), confirming the AsyncCopy needs the SPU. The texture upload runs through the SPU DMA/swizzle path.
+- **Now at:** the finish line is the documented `spu_lifter` bug that makes the AsyncCopy SPU program infinite-loop (an `r1` stack-pointer drift across a tail-call loop). Fixing it lets the texture upload complete → `onInit` finishes → the frame loop → the ducks. **The demo does not yet render its own content**, but the single remaining blocker is now precisely located.
+
 ### v0.16.0 — Correction: the VBO-name OOM is real but not the blocker (2026-07-15)
 - **Guarded `glBindBuffer` against absurd names and the `GL_OUT_OF_MEMORY` disappeared — but the demo still spins on the same global (`0x006714F0`).** So the garbage-VBO-name OOM, while a genuine corruption bug, does **not** gate rendering. The real wall is an independent wait.
 - **Mesh objects are static globals** (`0x671xxx`, the spin address lives in this region). For the main mesh path the VBO names are actually valid (dumped `1,2,3,4,5,…`); the garbage only appears when a bind reads a field whose `glGenBuffers` was skipped (gated by per-mesh flag bytes, or the multi-LOD `[mesh+0x58]>=2` path), leaving a stale stack address.
