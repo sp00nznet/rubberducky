@@ -59,11 +59,12 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | PSGL device creation completes | **Working** | fixed frameless-cascade `r31`/stack-slot corruption around `_jsPlatformCreateDevice` + `psglCreateContext`; device+context+`MakeCurrent` succeed, `LContext` non-NULL |
 | Graphics init without aborting | **Working** | full PSGL bring-up runs with **zero asserts / no `exit(1)`** |
 | `onInit` completes (no exit) | **Working** | neutralized a spurious `_Unwind_Resume` that was quitting the app; onInit runs into its SPU setup |
-| Boot blocker isolated | **Done** | after graphics init the main thread spins on `sys_event_flag_wait(flag=30)` → ESRCH; **event flag 30 is never created** (it's the stubbed SPU/SPURS completion signal). `YDKJ_F100_OK=1` breaks the spin and advances the guest into GCM FIFO submission |
-| GCM FIFO submission reached | **Working** | past the flag-30 spin the guest calls `cellGcmGetControlRegister` and drives the jsGcm FIFO reference handshake (RSX `ref` @ `0x0F800028`) |
-| SPU render pipeline runs | **Blocked** | the demo's SPU init doesn't execute (SPU/SPURS stubbed). Confirmed via `RD_FIFO_DBG`: with the flag-30 wait force-skipped, the FIFO holds a **stack address (`0x0FEFFA30`) instead of a valid `SET_REFERENCE`** — so the ref-sync never converges. The SPU workloads (lifted `spu_0000`–`0003`) must actually run |
-| Scene geometry (`demo_draw`) | **Blocked** | not reached; gated on the SPU pipeline producing valid FIFO/state |
-| First frame (demo content) | Not yet | **the demo does not yet render its own content** — the D3D12 window opens and presents cleared frames, but `demo_draw` is never reached |
+| cellGcmFinish reference-sync | **Working** | the "flag=30 spin" was **misdiagnosed** — it is `cellGcmFinish`'s ref-sync loop, whose `usleep(30)` yield is misrouted to `event_flag_wait` (a syscall-141 collision). `process_fifo` drains the `SET_REFERENCE` and sets `ctrl->ref`, so the loop exits and the demo proceeds |
+| First RSX draw + flip setup | **Working** | `SetFlipHandler`/`SetFlipMode`, then a real `[RSX] CLEAR_SURFACE mask=0x10` |
+| Duck assets load into GL | **Working** | loads **all** duck meshes (`duckRflct`, `newLOD1`, `newLOD3`, `duck.smesh`/`.reflect.smesh`/`.many.smesh`) + `duck.tga`, and runs `createGLIndexedArrays` + `cellPad`/`cellKb`/`cellMouse` init |
+| GL buffer name-space | **Blocked** | the PSGL buffer name-space allocator (`_jsTexNameSpaceGenNames` at `LContext+0x16AC`) returns **garbage buffer IDs** (e.g. `0x3FBFE444`). `glBindBuffer` sizes an array `realloc` from the ID → **~1 GB OOM / `GL_OUT_OF_MEMORY`** → the VBOs never get created |
+| Scene geometry (`demo_draw`) | **Blocked** | gated on valid VBO creation; the main thread spins on global `0x006714F0` after the OOM |
+| First frame (demo content) | Not yet | **the demo does not yet render its own content** — but it now loads its meshes/texture and issues a real clear; the wall is the GL name-space allocator, **not** the SPU pipeline |
 
 ### What Works Now
 
@@ -223,6 +224,12 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.14.0 — The "SPU wall" was a misdiagnosis; demo loads its ducks and issues a draw (2026-07-15)
+- **Overturned the previous diagnosis.** Reading the return address at the flag-30 wait (`lr=0x001BB158`) identified the caller as **`cellGcmFinish`**. The spin is its reference-sync loop, not an SPU-completion wait. Its `usleep(30)` yield is misrouted to `event_flag_wait` because the runtime's syscall table assigns event flags to 139–143 (wrong — real lv2 is 82–89), colliding with timer `usleep`/`sleep` (141/142). The yield returns `ESRCH` instead of sleeping, so cellGcmFinish hot-spins — but `process_fifo` (the vblank-ticker thread) drains the queued `SET_REFERENCE` and sets `ctrl->ref`, so the loop **does** exit. The earlier "SPU pipeline required / FIFO holds `0x0FEFFA30`" conclusion was a misread of a rate-capped diagnostic.
+- **The demo runs far past that point — reproducibly, on a clean build.** With `PS3_VFS_ROOT=input`, it runs `cellGcmFinish` → `SetFlipHandler`/`SetFlipMode` → a real **`CLEAR_SURFACE`** → **loads every duck mesh** (`duckRflct`, `newLOD1`, `newLOD3`, plus `duck.smesh`/`.reflect.smesh`/`.many.smesh`) and `duck.tga` → `createGLIndexedArrays` → `cellPad`/`cellKb`/`cellMouse` init.
+- **New wall, precisely traced.** The PSGL GL **buffer name-space allocator** (`_jsTexNameSpaceGenNames` at `LContext+0x16AC`) hands out **garbage buffer IDs** (e.g. `0x3FBFE444`). `glBindBuffer` then sizes an array `realloc` directly from the ID, asking for ~1 GB → the bump allocator OOMs → `GL_OUT_OF_MEMORY` → the vertex-buffer objects are never created, and the main thread spins on global `0x006714F0`.
+- **Now at:** fix the GL buffer name-space allocator so `glGenBuffers` returns valid IDs (trace `_jsTexNameSpaceGenNames` + how the name space at `LContext+0x16AC` is initialised — part of a recurring garbage-value pattern, likely an uninitialised/corrupt struct). This is far closer to first pixels than the SPU pipeline, which is **not** on the render path. **The demo does not yet render its own content.**
 
 ### v0.13.0 — Boot blocker isolated: the never-created SPU event flag (2026-07-15)
 - **Pinned the exact guest boot blocker.** After the full graphics init, the main thread spins forever on `sys_event_flag_wait(flag=30)`, which returns `ESRCH` because **event flag 30 is never created** — no `flag_create` for it appears anywhere, and no other PPU thread creates it. It's the completion signal the stubbed SPU/SPURS subsystem would raise. (The D3D12 window itself opens regardless — the vblank-ticker host thread initialises the backend at boot — but the *guest* never gets past this wait.)
