@@ -47,8 +47,11 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | Guest heap | **Working** | dlmalloc's arena never backs (MORECORE unimplemented) → the 5 public allocators are overridden with a bump allocator (`src/rd_malloc.cpp`); the game's own debug malloc now returns real addresses |
 | Reaches renderer | **Working** | past CRT/module init into `dmaCmd`, the demo's GPU command-submission path |
 | Raw-SPU MFC proxy DMA | **Working** | `sys_raw_spu_mmio_write/_read` overridden (`src/rd_spu.cpp`): DMAs execute as memcpy in the flat VM, proxy tag-status reports complete |
-| Raw-SPU code execution | **Executes (gated)** | the lifted SPU program (`spu_0004`) runs on ps3recomp's SPU core (`RD_SPU_RUN=1`); it infinite-loops because the SPU stack pointer `r1` drifts across a tail-call loop (a lifter frame-management bug) — diagnosed to the exact instruction, next is the lifter fix (current wall) |
-| First frame | Not yet | gated by async raw-SPU execution below |
+| Raw-SPU code execution | **Working** | the lifted SPU (`spu_0004`) runs as an async host-thread worker with live mailbox exchange; the AsyncCopy ready-handshake completes and the game leaves init |
+| Natural cellGcmInit | **Working** | the game's own `_cellGcmInitBody` fires (cmdbuf, ioAddr `0x11100000`); `cellGcmSys` Init + SetGraphicsHandler run |
+| FIFO sync (cellGcmFinish) | **Working** | SET_REFERENCE + control-register get/ref now advance as the RSX drains, so `cellGcmFinish` completes |
+| RSX FIFO init | **In progress** | game is deep in `_jsGcmFifoInit`, setting up + polling RSX FIFO hardware registers (current wall) |
+| First frame | Not yet | gated by the remaining RSX-init / first-draw walls |
 
 ### What Works Now
 
@@ -208,6 +211,13 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.6.0 — Natural GCM init + FIFO sync; into RSX FIFO setup (2026-07-15)
+- **cellGcmFinish completes.** Root-caused the graphics-init spin: the RSX command parser ignored **NV406E_SET_REFERENCE** (FIFO method `0x50`), so the control register's `ref` never advanced and `cellGcmFinish` (which the game's `_jsGcmInitRM` calls) polled it forever. Added SET_REFERENCE → `control->ref`, and made the FIFO processor advance `control->get` as it drains (both in ps3recomp's `cellGcmSys`/`rsx_commands`).
+- **Progress:** the game now runs `main → psglInit → _jsDeviceInit → _jsGcmInit`, its own `_cellGcmInitBody` fires, `cellGcmFinish` returns, and it advances into `_jsGcmFifoInit` — RSX FIFO hardware-register setup, the next wall.
+
+### v0.5.0 — Async SPU handshake; game reaches GCM/RSX init (2026-07-15)
+- Ran the raw SPU as an **async host-thread worker** with live mailbox exchange (out-mailbox ring, In_Mbox feed) and the correct `SPU_MBox_Stat` byte layout. The AsyncCopy ready-handshake (`_jsAsyncCopyInit`) completes, unblocking the game out of init and into graphics — the natural `_cellGcmInitBody` fires.
 
 ### v0.4.0 — The raw SPU executes (2026-07-15)
 - **Fixed a real `spu_lifter.py` bug** — brsl/brasl target resolution read the link register instead of the address operand, so every SPU call lifted as an unresolved TODO. `spu_0004` now lifts with zero TODOs (committed to the ps3recomp research checkout).
