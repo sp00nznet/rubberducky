@@ -174,16 +174,18 @@ static DWORD WINAPI vblank_ticker(LPVOID)
      * and catch up in a bounded burst so present latency never slows the game. */
     ULONGLONG next_tick = GetTickCount64();
     for (;;) {
-        Sleep(4);
+        Sleep(1);
+        /* Drain the GCM FIFO as fast as we wake (~1ms), decoupled from the 60Hz
+         * present/flip tick. The game's _jsGcmFifoFinish reference-wait spins on
+         * control->ref expecting the RSX to advance it promptly; draining only at
+         * 60Hz lets that wait time out (JSGcmFifo.cpp:142 ref-mismatch assert), so
+         * keep control->get/ref tracking control->put with ~1ms latency. */
+        if (rsx_ok) cellGcm_rsx_process_fifo();
         ULONGLONG now = GetTickCount64();
         int fired = 0;
         while ((long long)(now - next_tick) >= 0 && fired < 240) {
             cellGcmTickVBlank();
             cellGcmTickFlip();
-            /* Drain the game's GCM FIFO every tick -- this writes the RSX sync-fence
-             * labels (e.g. @0x03000410) that the game's per-frame logic blocks on.
-             * Doing it here (not after present) keeps those fences advancing at 60Hz
-             * even when present() throttles on a hidden/occluded window. */
             if (rsx_ok) cellGcm_rsx_process_fifo();
             next_tick += 16;                 /* ~60 Hz */
             fired++;
