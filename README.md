@@ -225,6 +225,12 @@ This project contains no proprietary Sony code, game binaries, encryption keys, 
 
 ## Changelog
 
+### v0.18.0 — AsyncCopy bypass: demo loads ALL assets + shaders, reaches Cg shader creation (2026-07-15)
+- **Breakthrough.** Overriding `_jsAsyncCopy` with a synchronous host `memcpy` (and no-op'ing `_jsAsyncCopyFinish`) bypasses the raw-SPU AsyncCopy program's infinite loop that hung the texture upload. The demo now uploads the duck texture **and all its mipmaps**, then loads **duckgreen, the full environment cubemap, and the particle-fluid Cg shader** — reaching Cg vertex-program creation. The SPU worker still runs for the AsyncCopy init handshake (`RD_SPU_NORUN=1` regresses further back).
+- **New wall: Cg shader creation fails.** `cgCreateProgramFromFile` on the deprecated-format `.vpo` returns an invalid program handle → `g_paramModelViewProjection` assertion → abort. Chain: `initShaders → cParticleFluidLoadShader → cgCreateProgramFromFile → … → _jsGcmGenerateProgram → _jsCreatePushBuffer`.
+- **Diagnosed part of it:** `_jsCreatePushBuffer`'s aligned-alloc callback pointer is *statically* `_jsMemalign` but is **corrupted to a mid-function garbage address at runtime** (the same uninitialised-callback-OPD pattern as the v0.7 jsGcm reserve callbacks). Redirecting it resolves that call, but the program is still invalid — the deprecated-Cg-binary parsing fails deeper.
+- **Now at:** the Cg shader subsystem (why the `.vpo` program handle is invalid), plus the recurring runtime callback-pointer corruption. **The demo does not yet render its own content**, but it now loads every asset and texture and reaches shader compilation — dramatically further than before.
+
 ### v0.17.0 — The real wall: raw-SPU AsyncCopy texture upload (SPU *is* on the render path) (2026-07-15)
 - **The `gDuckTexture` spin was a false positive.** It's the texture object's dest-buffer pointer, read as a loop invariant ~1M times by the bounded RGB→RGBA pixel-conversion loop in `TsimpleTexture::load` (512×512 = 262144 iterations) — enough to trip the hot-poll detector, but the loop completes.
 - **The true stuck point, pinned via a spin-backtrace (built with `/OPT:NOICF` for reliable symbols):** the main thread is in `_jsRawRasterToImage → _jsVMXCopyWithPrealloc → fast_memcpy → _jsAsyncCopy → _jsAsyncCopyFinish`. `fast_memcpy` delegates the 1 MB texture copy to the **raw-SPU AsyncCopy**, and a SPU worker thread is running the AsyncCopy program (`spu_func_000000E0`) — but it never signals completion, so `_jsAsyncCopyFinish` waits forever.
