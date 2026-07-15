@@ -242,3 +242,4 @@ void rd_hle_spu_mmio_read(ppu_context* ctx)
         fprintf(stderr, "[rd_spu] R id=%u off=0x%04X -> 0x%08X\n", id, off & 0xFFFF, r);
     ctx->gpr[3] = r;
 }
+

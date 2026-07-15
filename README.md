@@ -50,8 +50,8 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | Raw-SPU code execution | **Working** | the lifted SPU (`spu_0004`) runs as an async host-thread worker with live mailbox exchange; the AsyncCopy ready-handshake completes and the game leaves init |
 | Natural cellGcmInit | **Working** | the game's own `_cellGcmInitBody` fires (cmdbuf, ioAddr `0x11100000`); `cellGcmSys` Init + SetGraphicsHandler run |
 | FIFO sync (cellGcmFinish) | **Working** | SET_REFERENCE + control-register get/ref now advance as the RSX drains, so `cellGcmFinish` completes |
-| RSX FIFO init | **In progress** | game is deep in `_jsGcmFifoInit`, setting up + polling RSX FIFO hardware registers (current wall) |
-| First frame | Not yet | gated by the remaining RSX-init / first-draw walls |
+| RSX FIFO init | **In progress** | `_jsGcmFifoInit` waits on a GCM reference-sync (`control->ref`); forcing it through reaches `SetFlipHandler`/`SetFlipMode` (flip setup) — the correct ref protocol is the current wall |
+| First frame | Not yet | one ref-sync + first-draw away — flip setup is reached when the ref-wait is forced |
 
 ### What Works Now
 
