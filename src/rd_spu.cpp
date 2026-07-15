@@ -274,3 +274,14 @@ void rd_hle_jsasynccopyfinish(ppu_context* ctx) /* _jsAsyncCopyFinish() -> alrea
 {
     ctx->gpr[3] = 0;
 }
+
+/* Preserve r31 across the Cg program-generation calls in _jsCgCreateProgram: a
+ * deep callee in that chain corrupts r31 (frame-pointer) by overflowing an
+ * ancestor stack frame, so _jsCgCreateProgram's later name-slot read AND its
+ * epilogue use a bad r31 -> invalid CGprogram handle + cascading corruption of
+ * the context/other handles -> shader-load abort. Snapshot r31 before each
+ * generate call and restore it after. ponytail: mitigation for a residual
+ * ppu_lifter guest-frame overflow; the real fix is lifter frame handling. */
+static unsigned g_rd_r31 = 0;
+void     rd_r31_save(unsigned v) { g_rd_r31 = v; }
+unsigned rd_r31_load(void)       { return g_rd_r31; }

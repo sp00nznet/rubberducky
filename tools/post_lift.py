@@ -78,6 +78,33 @@ REG_PRESERVE_PATCHES = [
     # (The v0.9.0 device-creation nonvolatile wraps were removed: the ppu_lifter
     # callee-save scratch-slot fix eliminated the r31/stack corruption they
     # mitigated — device creation now succeeds without them.)
+    #
+    # _jsCgCreateProgram (func_00153814): the two Cg program-generation calls
+    # (_jsPlatformGenerateVertexProgram func_000C3B18 @ lr 0x00153A48,
+    # _jsPlatformGenerateFragmentProgram func_00129054 @ lr 0x00153AA4) corrupt
+    # r31 — a deep callee in the _jsGcmGenerateProgram/_jsCreatePushBuffer chain
+    # overflows an ancestor stack frame (residual ppu_lifter frame bug). With a
+    # bad r31, the function reads the CGprogram-name slot from the wrong address
+    # -> garbage handle -> cgGetNamedParameter "Invalid program handle" -> the
+    # particlefluid shader load abort()s. Snapshot r31 around each generate call
+    # (host global via src/rd_spu.cpp) and restore it. Advances the Cg shader
+    # load (was cg_particlefluid.cpp:98, now :101). ponytail: targeted r31
+    # preservation around a systemic lifter guest-frame overflow; the real fix is
+    # lifter frame handling. r31 is nonvolatile so restoring it is ABI-correct.
+    (
+        "        ctx->lr = 0x00153A48; func_000C3B18(ctx); DRAIN_TRAMPOLINE(ctx);",
+        "        { extern void rd_r31_save(unsigned); rd_r31_save((unsigned)ctx->gpr[31]); } /* rd-cgr31v */\n"
+        "        ctx->lr = 0x00153A48; func_000C3B18(ctx); DRAIN_TRAMPOLINE(ctx);\n"
+        "        { extern unsigned rd_r31_load(void); ctx->gpr[31] = rd_r31_load(); }",
+        "rd-cgr31v",
+    ),
+    (
+        "        ctx->lr = 0x00153AA4; func_00129054(ctx); DRAIN_TRAMPOLINE(ctx);",
+        "        { extern void rd_r31_save(unsigned); rd_r31_save((unsigned)ctx->gpr[31]); } /* rd-cgr31f */\n"
+        "        ctx->lr = 0x00153AA4; func_00129054(ctx); DRAIN_TRAMPOLINE(ctx);\n"
+        "        { extern unsigned rd_r31_load(void); ctx->gpr[31] = rd_r31_load(); }",
+        "rd-cgr31f",
+    ),
 ]
 
 
