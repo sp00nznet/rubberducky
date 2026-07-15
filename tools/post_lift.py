@@ -55,6 +55,22 @@ ALLOC_PATCHES = {
 # real fix is frame isolation in the lifter. Each is a unique call site.
 REG_PRESERVE_PATCHES = [
     # (find, replace, tag) — applied once each, idempotent via the tag check.
+    # DuckApp::onInit: SpuPrintfServer::initialize (func_001CF704) spuriously
+    # returns an exception-object pointer (0x696B48) instead of 0 (the lifter's
+    # spurious-EH bug — no real C++ exception is ever raised). onInit then
+    # branches into a cleanup landing pad whose `_Unwind_Resume; goto self;`
+    # loops forever (with _Unwind_Resume no-op'd). Force the result to 0 so
+    # onInit takes the success path into startSpuThreadSimple/initGraphics.
+    (
+        "        func_001CF704(ctx); DRAIN_TRAMPOLINE(ctx);\n"
+        "        /* nop */;\n"
+        "        { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0;",
+        "        func_001CF704(ctx); DRAIN_TRAMPOLINE(ctx);\n"
+        "        ctx->gpr[3] = 0; /* rd-ehfix: SpuPrintfServer::init spurious-throw -> force success */\n"
+        "        /* nop */;\n"
+        "        { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0;",
+        "rd-ehfix: SpuPrintfServer::init spurious-throw -> force success",
+    ),
     (
         "        ctx->gpr[3] = ctx->gpr[0] | ctx->gpr[0];\n"
         "        func_0013DB20(ctx); DRAIN_TRAMPOLINE(ctx);\n"

@@ -124,3 +124,5 @@ void rd_hle_memset(ppu_context* ctx)
  * control flow in spu_lifter/ppu_lifter. Safe here because the title never
  * raises a real C++ exception (confirmed by the EH-entrypoint taps). */
 void rd_hle_unwind_resume(ppu_context* ctx) { (void)ctx; }
+
+
