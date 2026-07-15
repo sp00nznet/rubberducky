@@ -58,9 +58,10 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | FIFO reference-sync | **Working** | drain FIFO every ~1ms (not only 60Hz) so `_jsGcmFifoFinish`'s reference-wait passes; `JSGcmFifo.cpp:142` now transient |
 | PSGL device creation completes | **Working** | fixed frameless-cascade `r31`/stack-slot corruption around `_jsPlatformCreateDevice` + `psglCreateContext`; device+context+`MakeCurrent` succeed, `LContext` non-NULL |
 | Graphics init without aborting | **Working** | full PSGL bring-up runs with **zero asserts / no `exit(1)`** |
-| Reaching `main`'s frame loop | **Blocked** | nondeterministic: exits before the loop or hangs in the `FWCellGLWindow` ctor / `onInit` device-creation region (`_jsGcmFifoInit` ref-wait); `update()`/`render()` never execute (current wall) |
-| Scene geometry (`demo_draw`) | **Blocked** | `demo_draw` (PPU-side GL: `draw_scene`/`glDrawElements`) is never reached; the SPU-driven water/duck pipeline that feeds it isn't running |
-| First frame (demo content) | Not yet | gated by deterministic device creation + the SPU render pipeline; **the demo does not yet render its own content** |
+| `onInit` completes (no exit) | **Working** | neutralized a spurious `_Unwind_Resume` that was quitting the app; onInit runs into its SPU setup |
+| SPU render pipeline runs | **Partial** | raw-SPU DMA runs; onInit reaches SPU thread-group creation but spins — an indirect call through an uninitialized object is no-op'd, so the group never starts |
+| Scene geometry (`demo_draw`) | **Blocked** | `demo_draw` (PPU-side GL) not yet reached; gated on the SPU groups starting + the uninitialized-dispatch-object root |
+| First frame (demo content) | Not yet | **the demo does not yet render its own content** (now runs its pipeline instead of aborting) |
 
 ### What Works Now
 
@@ -220,6 +221,12 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.10.0 — Spurious-unwind fix; demo reaches its SPU render pipeline (2026-07-15)
+- **`onInit` was quitting via a spurious C++ unwind.** `DuckApp::onInit` ended in `sys_process_exit(1)`. Tapping every EH-raise entry point (`__cxa_throw`, `__cxa_rethrow`, `_Unwind_RaiseException`, `__cxa_allocate_exception`, `terminate`) proved **no real exception is ever thrown** — the lifter reaches a cleanup landing-pad's `_Unwind_Resume` on a *normal* path (exception-object arg = `0xFFFFFFFF`), so "resuming" a nonexistent exception falls into `terminate → abort → exit(1)`, killing onInit before the frame loop. (An earlier no-op test was confounded by a cached build; a forced recompile confirmed `_Unwind_Resume` fires 4× and neutralizing it stops the exit.)
+- **Fix:** override `_Unwind_Resume` (guest `0x003A12EC`) with a no-op via `post_lift.py`. `ponytail:` neutralizes a spurious lift-EH unwind — the real fix is landing-pad control flow in the lifter — safe because the title never raises a real exception.
+- **Result:** onInit now completes and the demo runs **indefinitely** (no exit) into its **SPU render pipeline** for the first time — raw-SPU MFC DMA loads run, and onInit reaches **SPU thread-group creation**.
+- **Now at:** the SPU thread-group setup makes an indirect call through an **uninitialized object** (the same garbage-dispatch root from device creation) which the runtime no-ops, so the group never starts and the main thread spins on the result flag; `sys_event_flag_wait(10/30)` returns `ESRCH` (garbage flag ids). **The demo does not yet render its own content** — but it now runs its render pipeline instead of aborting. Next: fix the uninitialized jsGcm driver/shader/SPU dispatch objects so the SPU groups start and signal completion.
 
 ### v0.9.1 — Render path fully mapped; frame loop not yet reliably reached (2026-07-15)
 - **Correction:** the earlier "frame loop runs" was wrong — instrumenting the render chain (`FWCellGLWindow::update`, `FWWindow::render`, `DuckApp::onRender`/`onUpdate`, `demo_draw`, `glDrawElements`) shows **none of them execute**. The single `CLEAR_SURFACE` comes from device setup, not a rendered frame.
