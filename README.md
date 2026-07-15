@@ -58,9 +58,9 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | FIFO reference-sync | **Working** | drain FIFO every ~1ms (not only 60Hz) so `_jsGcmFifoFinish`'s reference-wait passes; `JSGcmFifo.cpp:142` now transient |
 | PSGL device creation completes | **Working** | fixed frameless-cascade `r31`/stack-slot corruption around `_jsPlatformCreateDevice` + `psglCreateContext`; device+context+`MakeCurrent` succeed, `LContext` non-NULL |
 | Graphics init without aborting | **Working** | full PSGL bring-up runs with **zero asserts / no `exit(1)`** |
-| Frame loop runs | **Working** | `main` executes `update()`/`render()`/`glFinish()`; each frame emits the `CLEAR_SURFACE` |
-| Scene geometry (SPU render) | **Blocked** | `render()` emits only the clear — the SPU-driven water/duck pipeline isn't producing `DRAW` commands; frame loop also exits after ~1 iteration (current wall) |
-| First frame (demo content) | Not yet | gated by the SPU render pipeline; **the demo does not yet render its own content** |
+| Reaching `main`'s frame loop | **Blocked** | nondeterministic: exits before the loop or hangs in the `FWCellGLWindow` ctor / `onInit` device-creation region (`_jsGcmFifoInit` ref-wait); `update()`/`render()` never execute (current wall) |
+| Scene geometry (`demo_draw`) | **Blocked** | `demo_draw` (PPU-side GL: `draw_scene`/`glDrawElements`) is never reached; the SPU-driven water/duck pipeline that feeds it isn't running |
+| First frame (demo content) | Not yet | gated by deterministic device creation + the SPU render pipeline; **the demo does not yet render its own content** |
 
 ### What Works Now
 
@@ -220,6 +220,12 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.9.1 — Render path fully mapped; frame loop not yet reliably reached (2026-07-15)
+- **Correction:** the earlier "frame loop runs" was wrong — instrumenting the render chain (`FWCellGLWindow::update`, `FWWindow::render`, `DuckApp::onRender`/`onUpdate`, `demo_draw`, `glDrawElements`) shows **none of them execute**. The single `CLEAR_SURFACE` comes from device setup, not a rendered frame.
+- **`main`'s frame loop is real and PPU-side.** `main` (`func_001B626C`) constructs `FWCellGLWindow` (which runs `onInit`), calls `cellSysutilRegisterCallback`, then loops `while(run flag) { cellSysutilCheckCallback(); update(); render(); }`. `DuckApp::onRender` → **`demo_draw`** (`func_000179F8`) is a full GL renderer (`draw_scene`, `drawHeightFluid`, `glDrawElements`, VBOs, matrices) — so if the loop runs, real `DRAW` commands would flow to the RSX.
+- **Why it's not reached:** the demo behaves **nondeterministically** — it either exits before the frame-loop setup or hangs inside the `FWCellGLWindow` ctor / `onInit` (device-creation) region. The hang is `_jsGcmFifoInit`'s reference-wait (`_jsGcmFifoReadReference` polling `control->ref` at `dmaControl+0x48` = `0x0F800028`; the control EA `0x0F800020` does line up with the game's). This nondeterminism is consistent with the systemic frameless-cascade clobber (v0.9.0) plus RSX ref-timing races.
+- **Now at:** making device creation *deterministically* complete so `main` reaches its frame loop, and standing up the **SPU asset/geometry pipeline** that feeds `demo_draw` (the water/duck simulation runs on SPUs — the known unfixed `spu_lifter` frame bug). **The demo does not yet render its own content.**
 
 ### v0.9.0 — PSGL device creation fixed; demo runs into its task runtime (2026-07-15)
 - **The systemic root: frameless-cascade register/stack corruption.** Traced the demo's `abort → exit(1)` all the way down: `DuckApp::onInit` unwound because `psglMakeCurrent` got a **null device**, because `psglCreateDeviceExtended` returned null even though `_jsPlatformCreateDevice` succeeded (returned `CELL_OK`). The cause is a recompiler frameless-cascade bug — a deeply-nested callee stores above its own frame and clobbers an ancestor's saved-register slot / locals. Two concrete victims: `r31` (frame pointer) is corrupted `0x0FEFFA60 → 0x1` across `_jsPlatformCreateDevice` (so Extended reads the wrong stack slot and returns `[0x1+0x74]=0`), and the caller's saved device pointer at `[r31+0x14]` is overwritten with `0` across `psglCreateContext`.
