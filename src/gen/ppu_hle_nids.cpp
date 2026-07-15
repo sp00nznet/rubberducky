@@ -12,6 +12,7 @@ extern "C" {
     void cellGcmGetFlipStatus(void);
     void cellGcmTickVBlank(void);
     void cellGcmTickFlip(void);
+    void cellGcm_rsx_set_reference(void);
     void cellGcm_rsx_process_fifo(void);
     void cellGcm_fifo_recycle(void);
     void cellGcmSetDisplayBuffer(void);
@@ -181,6 +182,14 @@ extern "C" {
     void cellMouseGetInfo(void);
     void cellMouseSetTabletMode(void);
     void cellMouseClearBuf(void);
+    void cellVideoOut_set_resolution(void);
+    void cellVideoOutGetState(void);
+    void cellVideoOutGetResolution(void);
+    void cellVideoOutConfigure(void);
+    void cellVideoOutGetConfiguration(void);
+    void cellVideoOutGetDeviceInfo(void);
+    void cellVideoOutGetNumberOfDevice(void);
+    void cellVideoOutGetResolutionAvailability(void);
 }
 extern "C" void ppu_hle_register_all(void) {
     ps3_hle_register(0xB477F06Au, "cellGcmInit", (void*)cellGcmInit);
@@ -194,6 +203,7 @@ extern "C" void ppu_hle_register_all(void) {
     ps3_hle_register(0x72A577CEu, "cellGcmGetFlipStatus", (void*)cellGcmGetFlipStatus);
     ps3_hle_register(0x519386B9u, "cellGcmTickVBlank", (void*)cellGcmTickVBlank);
     ps3_hle_register(0x23BB5407u, "cellGcmTickFlip", (void*)cellGcmTickFlip);
+    ps3_hle_register(0xDBED8C8Eu, "cellGcm_rsx_set_reference", (void*)cellGcm_rsx_set_reference);
     ps3_hle_register(0x89626052u, "cellGcm_rsx_process_fifo", (void*)cellGcm_rsx_process_fifo);
     ps3_hle_register(0x6CBB16D4u, "cellGcm_fifo_recycle", (void*)cellGcm_fifo_recycle);
     ps3_hle_register(0xA53D12AEu, "cellGcmSetDisplayBuffer", (void*)cellGcmSetDisplayBuffer);
@@ -363,4 +373,12 @@ extern "C" void ppu_hle_register_all(void) {
     ps3_hle_register(0x5BAF30FBu, "cellMouseGetInfo", (void*)cellMouseGetInfo);
     ps3_hle_register(0x2D16DA4Fu, "cellMouseSetTabletMode", (void*)cellMouseSetTabletMode);
     ps3_hle_register(0x3EF66B95u, "cellMouseClearBuf", (void*)cellMouseClearBuf);
+    ps3_hle_register(0x46AEFCF1u, "cellVideoOut_set_resolution", (void*)cellVideoOut_set_resolution);
+    ps3_hle_register(0x887572D5u, "cellVideoOutGetState", (void*)cellVideoOutGetState);
+    ps3_hle_register(0xE558748Du, "cellVideoOutGetResolution", (void*)cellVideoOutGetResolution);
+    ps3_hle_register(0x0BAE8772u, "cellVideoOutConfigure", (void*)cellVideoOutConfigure);
+    ps3_hle_register(0x15B0B0CDu, "cellVideoOutGetConfiguration", (void*)cellVideoOutGetConfiguration);
+    ps3_hle_register(0x1E930EEFu, "cellVideoOutGetDeviceInfo", (void*)cellVideoOutGetDeviceInfo);
+    ps3_hle_register(0x75BBB672u, "cellVideoOutGetNumberOfDevice", (void*)cellVideoOutGetNumberOfDevice);
+    ps3_hle_register(0xA322DB75u, "cellVideoOutGetResolutionAvailability", (void*)cellVideoOutGetResolutionAvailability);
 }
