@@ -28,15 +28,106 @@
  * (patched in by tools/post_lift.py).
  */
 #include "ppu_recomp.h"
+#include "spu_context.h"     /* spu_context, SPU_LS_SIZE, spu_context_init, SPU_STATUS_* */
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>   /* getenv */
 
 extern "C" uint8_t* vm_base;
+extern "C" {
+    int  spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx);
+    /* SPU->PPU outbound-mailbox delivery hook (runtime/spu/spu_channels.c). */
+    extern void (*g_spu_out_mbox_hook)(uint32_t group_id, uint32_t spu_id,
+                                       uint32_t which, uint32_t value);
+    /* Lifted spu_0004 (src/spu_gen/spu_0004) — the lifter's header declares these
+     * outside its extern "C", so declare them here with C linkage ourselves. */
+    void spu_recomp_register(void);
+    void spu_func_000000E0(spu_context* ctx);
+}
 
 #define RAW_SPU_LS_BASE   0xE0000000u   /* per-SPU local store  */
 #define RAW_SPU_PS_BASE   0xE0040000u   /* per-SPU problem state */
 #define RAW_SPU_STRIDE    0x00100000u
+
+/* The demo's raw SPU runs spu_0004 (entry LS 0xE0 = the NPC). Its ELF is already
+ * in guest RAM as part of the .spu_image section (extracted copy = spu/). */
+#define SPU0004_GUEST_ELF 0x497500u
+
+static int rd_spu_trace(void);
+
+#define SPU_MAX 8
+static spu_context g_spu_ctx[SPU_MAX];
+static int         g_spu_ready[SPU_MAX];
+/* SPU->PPU outbound mailbox queue (served back through problem-state reads). */
+static uint32_t    g_out_mbox[SPU_MAX][8];
+static int         g_out_mbox_n[SPU_MAX];
+static int         g_out_mbox_rd[SPU_MAX];
+
+static void rd_spu_mbox_hook(uint32_t /*grp*/, uint32_t sid, uint32_t which, uint32_t val)
+{
+    if (which != 0 || sid >= SPU_MAX) return;            /* which 0 = WrOutMbox */
+    if (g_out_mbox_n[sid] < 8) g_out_mbox[sid][g_out_mbox_n[sid]++] = val;
+}
+
+/* Load a guest-resident SPU ELF's PT_LOAD segments into ctx->ls (big-endian). */
+static void rd_spu_load_image(spu_context* ctx, uint32_t guest_elf)
+{
+    const uint8_t* e = vm_base + guest_elf;
+    auto be32 = [](const uint8_t* p) {
+        return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+    };
+    auto be16 = [](const uint8_t* p) { return (uint16_t)(p[0] << 8 | p[1]); };
+    uint32_t phoff = be32(e + 28);
+    uint16_t phentsize = be16(e + 42), phnum = be16(e + 44);
+    for (uint16_t i = 0; i < phnum; i++) {
+        const uint8_t* ph = e + phoff + i * phentsize;
+        if (be32(ph) != 1) continue;                     /* PT_LOAD */
+        uint32_t off = be32(ph + 4), vaddr = be32(ph + 8), filesz = be32(ph + 16);
+        if ((uint64_t)vaddr + filesz <= SPU_LS_SIZE)
+            memcpy(ctx->ls + vaddr, e + off, filesz);
+    }
+}
+
+/* Run the raw SPU synchronously (RunCntl=RUN): load its image + the game's DMA'd
+ * param blocks into a fresh LS, execute the lifted entry, mirror LS back, and
+ * record the stop code + out-mailbox so the PPU's poll (SPU_Status / mailbox)
+ * completes. */
+static void rd_run_spu(uint32_t id)
+{
+    if (id >= SPU_MAX) return;
+    spu_context* ctx = &g_spu_ctx[id];
+    if (!g_spu_ready[id]) {
+        spu_recomp_register();                 /* register the lifted image once */
+        g_spu_out_mbox_hook = rd_spu_mbox_hook;
+        g_spu_ready[id] = 1;
+    }
+    spu_context_init(ctx, id);
+    uint32_t ps = RAW_SPU_PS_BASE + id * RAW_SPU_STRIDE;
+    uint32_t lsb = RAW_SPU_LS_BASE + id * RAW_SPU_STRIDE;
+
+    memset(ctx->ls, 0, SPU_LS_SIZE);
+    rd_spu_load_image(ctx, SPU0004_GUEST_ELF);            /* code + constants + defaults */
+    /* Overlay the game's DMA'd param blocks (staged into the raw-SPU LS by the
+     * MFC emulation): a header before the entry, and the param area at 0x1100. */
+    memcpy(ctx->ls + 0x80,   vm_base + lsb + 0x80,   0x60);
+    memcpy(ctx->ls + 0x1100, vm_base + lsb + 0x1100, 0x80);
+
+    ctx->pc = vm_read32(ps + 0x4034);                    /* NPC */
+    ctx->status = SPU_STATUS_RUNNING;
+    g_out_mbox_n[id] = g_out_mbox_rd[id] = 0;
+
+    if (rd_spu_trace())
+        fprintf(stderr, "[rd_spu] RUN id=%u entry=0x%X\n", id, ctx->pc);
+    spu_run_with_halt(spu_func_000000E0, ctx);           /* spu_0004 entry = 0xE0 */
+
+    memcpy(vm_base + lsb, ctx->ls, SPU_LS_SIZE);          /* mirror results back */
+    /* Publish SPU_Status: stopped + stop code (bits 16-23 as the game reads). */
+    vm_write32(ps + 0x4014, (ctx->stop_code << 16) | ctx->status);
+    vm_write32(ps + 0x4024, (ctx->stop_code << 16) | ctx->status);
+    if (rd_spu_trace())
+        fprintf(stderr, "[rd_spu] STOP id=%u status=0x%X stop_code=0x%X mbox_n=%d\n",
+                id, ctx->status, ctx->stop_code, g_out_mbox_n[id]);
+}
 
 static uint32_t g_dma_count = 0;
 
@@ -93,6 +184,16 @@ void rd_hle_spu_mmio_write(ppu_context* ctx)
     vm_write32(RAW_SPU_PS_BASE + id * RAW_SPU_STRIDE + off, val);  /* default store */
     if ((off & 0xFFFF) == 0x3014)                                 /* Class_CMD -> issue */
         rd_mfc_dma(id, val);
+    if ((off & 0xFFFF) == 0x401C && (val & 1)) {                  /* RunCntl = RUN */
+        /* Executing the SPU is gated: it runs the lifted spu_0004 (blockers 1 & 2
+         * solved), but raw SPU is asynchronous and this image reads SPU_RdInMbox
+         * mid-run, so a *synchronous* run deadlocks until async execution + the
+         * input-arg convention are wired. Default boot leaves it unrun (the tag-
+         * DMA path above still works). Set RD_SPU_RUN=1 to exercise it. */
+        static int run = -1;
+        if (run < 0) { const char* e = getenv("RD_SPU_RUN"); run = (e && *e && *e != '0'); }
+        if (run) rd_run_spu(id);
+    }
 }
 
 /* sys_raw_spu_mmio_read(id, off) -> val */
@@ -101,9 +202,16 @@ void rd_hle_spu_mmio_read(ppu_context* ctx)
     uint32_t id  = (uint32_t)ctx->gpr[3];
     uint32_t off = (uint32_t)ctx->gpr[4];
     uint32_t r;
+    int avail = (id < SPU_MAX) ? g_out_mbox_n[id] - g_out_mbox_rd[id] : 0;
     switch (off & 0xFFFF) {
         case 0x3104: r = 0xFFFFFFFFu; break;   /* all tag groups complete */
         case 0x3014: r = 0;          break;    /* CMDStatus: command accepted */
+        case 0x4004:                           /* SPU_Out_Mbox: pop one */
+            r = (id < SPU_MAX && avail > 0) ? g_out_mbox[id][g_out_mbox_rd[id]++] : 0;
+            break;
+        case 0x4014:                           /* SPU_MBox_Stat: out-mbox count */
+            r = ((uint32_t)avail & 0xFF) | (((uint32_t)avail & 0xFF) << 16);
+            break;
         default:     r = vm_read32(RAW_SPU_PS_BASE + id * RAW_SPU_STRIDE + off); break;
     }
     if (rd_spu_trace())

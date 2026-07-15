@@ -47,8 +47,8 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
 | Guest heap | **Working** | dlmalloc's arena never backs (MORECORE unimplemented) → the 5 public allocators are overridden with a bump allocator (`src/rd_malloc.cpp`); the game's own debug malloc now returns real addresses |
 | Reaches renderer | **Working** | past CRT/module init into `dmaCmd`, the demo's GPU command-submission path |
 | Raw-SPU MFC proxy DMA | **Working** | `sys_raw_spu_mmio_write/_read` overridden (`src/rd_spu.cpp`): DMAs execute as memcpy in the flat VM, proxy tag-status reports complete |
-| Raw-SPU code execution | **Blocked** | after the DMAs the demo sets NPC + RunCntl and runs an actual SPU program, polling SPU_Status for its stop code — needs an SPU execution core (current wall, below) |
-| First frame | Not yet | gated by the raw-SPU execution wall below |
+| Raw-SPU code execution | **Executes (gated)** | the lifted SPU program (`spu_0004`) now runs on ps3recomp's SPU core (`RD_SPU_RUN=1`); it loops on a PPU↔SPU mailbox handshake because raw SPU is asynchronous — needs async execution + the input-arg convention (current wall) |
+| First frame | Not yet | gated by async raw-SPU execution below |
 
 ### What Works Now
 
@@ -73,12 +73,12 @@ The demo ships as a **debug build with a full symbol table and DWARF** — a rar
   - ps3recomp's SPU runtime already provides the execution machinery: `spu_run_with_halt(entry, ctx)` (runs a lifted image with a longjmp halt pad), `mfc_do_transfer` (SPU-side MFC DMA — copies between `ctx->ls` and `vm_base`, exactly our flat VM), `g_spu_out_mbox_hook` (SPU→PPU mailbox), and `spu_stop` (sets status + stop code).
   - Remaining glue (the next milestone): on RunCntl=1, mirror the raw-SPU LS (`vm_base + 0xE0000000 + id*0x100000`) into `ctx->ls`, register the lifted image, `spu_run_with_halt` it from NPC, route `g_spu_out_mbox_hook` to the problem-state out-mailbox (`0x4004`) + mailbox-status, and translate `ctx->status`/`stop_code` back into `SPU_Status` (`0x4014`) so the game's poll completes. Then repeat for the remaining SPU workloads (the per-frame renderer) and let the RSX commands they emit flow to the D3D12 backend.
 
-  **What blocks it today (evidence, not estimate):** lifting `spu_0004` surfaced concrete gaps that make a quick wiring job impossible:
-  - The SPU lifter emits **9 unresolved `brsl` targets** (`spu_link(...) /* TODO */`) for this image — the lifted code is functionally incomplete and would mis-execute. Fixing this is `spu_lifter.py` work (branch-target resolution), not project glue.
-  - The lifter emits no initial **LS data image**, and the entry reads constants from LS (`0x1180`, `0x1110`) — the SPU ELF's data segments must be loaded into `ctx->ls` at runtime.
-  - The entry consumes **`r3`–`r6` as arguments**; the raw-SPU convention for passing them (the game sets NPC + RunCntl but no GPRs via MMIO) is not yet established.
+  **Progress — the SPU now executes.** Two of the three original blockers are solved and the lifted SPU program runs (`RD_SPU_RUN=1`):
+  - *Lifter bug fixed:* `spu_lifter.py` read the brsl **link register** (`$r0`) as the branch target, so every SPU call lifted as `spu_link(...) /* TODO unresolved */`. Fixed (scan operands for the address) — `spu_0004` now lifts with **zero TODOs**.
+  - *LS image loaded:* the SPU image isn't in the flat-VM LS (the game relies on `sys_raw_spu_load`, stubbed), so `src/rd_spu.cpp` loads the guest-resident SPU ELF (`.spu_image`, guest `0x497500`) into `ctx->ls`, overlays the game's DMA'd param blocks, and runs the lifted entry via `spu_run_with_halt`. The SPU executes real code.
+  - *Remaining wall (async):* raw SPU is **asynchronous** — this image reads `SPU_RdInMbox` mid-run, a PPU→SPU handshake. Running it *synchronously* inside the RunCntl write deadlocks (the PPU can't send the mailbox while it's blocked running the SPU). The fix is to run the SPU on a host thread and exchange mailboxes/signals with the live PPU (ps3recomp has the pattern in `spu_workload.c`), plus establish the raw-SPU `r3`–`r6` input convention. Then repeat across the SPU workload chain → RSX output to D3D12.
 
-  So the milestone is: fix the SPU lifter's branch resolution → load the LS data image + establish the arg convention → wire run/mailbox/stop → repeat across the SPU workload chain → RSX output to D3D12. A stub that fakes the stop code was considered and rejected: the game consumes the SPU's mailbox output and DMA'd results, so faking would not produce a correct frame.
+  A stub that fakes the stop code was considered and rejected: the game consumes the SPU's mailbox output and DMA'd results, so faking would not produce a correct frame.
 - **`sys_heap_malloc` returns a host pointer.** `libs/system/sysPrxForUser.c`'s `sys_heap_malloc` / `sys_heap_memalign` return a raw host `malloc()` pointer instead of a guest EA into `vm_base`. Not on this demo's critical path (it uses statically-linked dlmalloc, now overridden), but it will bite any title that does — flagged upstream for ps3recomp.
 - **2 unresolved cellSysutil NIDs** — `0x887572D5`, `0xE558748D`. Imported but not yet in ps3recomp's cellSysutil; they return the default HLE stub (0). Impact TBD.
 - **1 unimplemented lv2 syscall** — syscall `160`, hit once during graphics init; currently a no-op stub.
@@ -208,6 +208,11 @@ rubberducky/
 This project contains no proprietary Sony code, game binaries, encryption keys, or copyrighted assets. It is a clean-room reimplementation of PS3 system libraries paired with automated binary-translation tools. Users must supply their own legally obtained copy of the demo.
 
 ## Changelog
+
+### v0.4.0 — The raw SPU executes (2026-07-15)
+- **Fixed a real `spu_lifter.py` bug** — brsl/brasl target resolution read the link register instead of the address operand, so every SPU call lifted as an unresolved TODO. `spu_0004` now lifts with zero TODOs (committed to the ps3recomp research checkout).
+- **Raw-SPU execution wired** (`src/rd_spu.cpp`, `RD_SPU_RUN=1`): loads the guest-resident SPU ELF into a `spu_context` LS, overlays the game's DMA'd params, and runs the lifted entry on ps3recomp's SPU core (`spu_run_with_halt`) with mailbox + stop routed back to the problem-state registers. The SPU executes real code.
+- **Remaining wall identified precisely:** raw SPU is asynchronous — the image reads `SPU_RdInMbox` mid-run, which a synchronous run deadlocks. Next: async SPU execution (host thread + live mailbox exchange) + the r3–r6 input convention. Gated behind `RD_SPU_RUN` so the default boot is unchanged.
 
 ### v0.3.0 — Raw-SPU MFC proxy DMA; SPU-execution wall mapped (2026-07-15)
 - **MFC proxy DMA emulated.** Reverse-engineered the demo's raw-SPU problem-state protocol from the symbol-named `dmaCmd` / `doDma` / `waitForDmaTransfer` and overrode `sys_raw_spu_mmio_write/_read` (`src/rd_spu.cpp`, patched in by `tools/post_lift.py`). MFC DMA commands now execute synchronously as bounds-checked `memcpy` in the flat VM (LS at `0xE0000000 + id*0x100000`); the proxy tag-status reports complete so the DMA-wait poll falls through. Verified: the first async-copy DMAs run with correct direction/LS/EA/size.
