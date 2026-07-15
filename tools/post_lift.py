@@ -34,6 +34,10 @@ ALLOC_PATCHES = {
     # memset with a watchpoint on the jsGcmFifo (src/rd_malloc.cpp)
     "00391E30": ("rd_hle_memset",         "memset"),
     "003A12EC": ("rd_hle_unwind_resume",  "_Unwind_Resume"),
+    # jsGcm AsyncCopy -> synchronous host memcpy, bypassing the buggy raw-SPU
+    # copy loop that hangs the texture upload (src/rd_spu.cpp)
+    "00068170": ("rd_hle_jsasynccopy",       "_jsAsyncCopy"),
+    "00067EC0": ("rd_hle_jsasynccopyfinish", "_jsAsyncCopyFinish"),
 }
 
 

@@ -243,3 +243,34 @@ void rd_hle_spu_mmio_read(ppu_context* ctx)
     ctx->gpr[3] = r;
 }
 
+
+/* ---------------------------------------------------------------------------
+ * jsGcm AsyncCopy override.
+ *
+ * fast_memcpy (func_0005A548) delegates large (>=0x80, 16-aligned) copies to the
+ * raw-SPU AsyncCopy: _jsAsyncCopy(dst,src,size) issues an SPU-driven DMA and
+ * _jsAsyncCopyFinish waits for the SPU program to signal completion. The lifted
+ * AsyncCopy SPU program (spu_0004, entry LS 0xE0) infinite-loops (a spu_lifter
+ * r1-stack-drift bug), so _jsAsyncCopyFinish blocks forever -- which is where
+ * the demo hangs during the 1 MB duck-texture upload.
+ *
+ * The AsyncCopy is a linear DMA copy (dst,src,size), so do it synchronously on
+ * the host and make Finish a no-op. This bypasses the buggy SPU copy loop; the
+ * SPU worker itself stays running for the AsyncCopy *init* handshake (which the
+ * demo needs -- RD_SPU_NORUN=1 stalls earlier). ponytail: a targeted host copy
+ * around a known spu_lifter loop bug; the real fix is SPU r1 frame management.
+ * -----------------------------------------------------------------------*/
+void rd_hle_jsasynccopy(ppu_context* ctx)      /* _jsAsyncCopy(dst, src, size) */
+{
+    uint32_t dst  = (uint32_t)ctx->gpr[3];
+    uint32_t src  = (uint32_t)ctx->gpr[4];
+    uint32_t size = (uint32_t)ctx->gpr[5];
+    if (vm_base && size && size < 0x10000000u)
+        memcpy(vm_base + dst, vm_base + src, size);
+    ctx->gpr[3] = 0;
+}
+
+void rd_hle_jsasynccopyfinish(ppu_context* ctx) /* _jsAsyncCopyFinish() -> already done */
+{
+    ctx->gpr[3] = 0;
+}
