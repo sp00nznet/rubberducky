@@ -151,6 +151,10 @@ extern "C" ps3_guest_caller_fn g_ps3_guest_caller;        /* libs/system/cellSys
 extern "C" uint64_t ppu_guest_call(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern "C" void cellGcmTickVBlank(void);
 extern "C" void cellGcmTickFlip(void);
+/* Mark a vblank+flip tick pending WITHOUT running guest code -- the handlers are
+ * delivered on the main guest thread (ppu_gcm_pump at HLE boundaries), serialized
+ * with guest execution so the ticker thread never races it. */
+extern "C" void cellGcm_request_tick(void);
 
 static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
 { ppu_guest_call(opd, a0, a1, a2, a3); }
@@ -184,8 +188,7 @@ static DWORD WINAPI vblank_ticker(LPVOID)
         ULONGLONG now = GetTickCount64();
         int fired = 0;
         while ((long long)(now - next_tick) >= 0 && fired < 240) {
-            cellGcmTickVBlank();
-            cellGcmTickFlip();
+            cellGcm_request_tick();   /* no guest code here -- delivered on main thread */
             if (rsx_ok) cellGcm_rsx_process_fifo();
             next_tick += 16;                 /* ~60 Hz */
             fired++;
