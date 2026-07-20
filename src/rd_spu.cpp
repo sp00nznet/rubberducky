@@ -65,9 +65,26 @@ static volatile uint32_t g_out_mbox[SPU_MAX][16];
 static volatile long     g_out_mbox_wr[SPU_MAX];         /* producer index (SPU thread) */
 static volatile long     g_out_mbox_rd[SPU_MAX];         /* consumer index (PPU) */
 
-static void rd_spu_mbox_hook(uint32_t /*grp*/, uint32_t sid, uint32_t which, uint32_t val)
+/* The runtime's own mailbox hook (installed at init: routes an SPU thread's
+ * WrOutMbox/WrOutIntrMbox to its connected event queue). We overwrite the single
+ * global g_spu_out_mbox_hook to catch the RAW SPU's mailbox, so save the prior
+ * hook and chain to it for everything that isn't our raw SPU -- otherwise the
+ * interpreted sim SPUs' completion mailboxes get dropped and the PPU waits on
+ * their event queue forever. */
+static void (*g_prev_out_mbox_hook)(uint32_t, uint32_t, uint32_t, uint32_t) = 0;
+
+static void rd_spu_mbox_hook(uint32_t grp, uint32_t sid, uint32_t which, uint32_t val)
 {
-    if (which != 0 || sid >= SPU_MAX) return;            /* which 0 = WrOutMbox */
+    /* Not our raw SPU (raw ids are < SPU_MAX; sim-thread tids are >= 0x2000):
+     * only the INTERRUPT mailbox (which==1) generates a connected-queue event
+     * (the SPU's completion signal the PPU waits on). The regular WrOutMbox
+     * (which==0) is a plain PPU-readable mailbox, NOT an event -- forwarding it
+     * pushed spurious events onto q3/q5/q7 and made the game abort. Drop those. */
+    if (sid >= SPU_MAX) {
+        if (which == 1 && g_prev_out_mbox_hook) g_prev_out_mbox_hook(grp, sid, which, val);
+        return;
+    }
+    if (which != 0) return;                              /* which 0 = WrOutMbox */
     long w = g_out_mbox_wr[sid];
     g_out_mbox[sid][w & 15] = val;
     _WriteBarrier();
@@ -122,6 +139,8 @@ static void rd_run_spu(uint32_t id)
     spu_context* ctx = &g_spu_ctx[id];
     if (!g_spu_ready[id]) {
         spu_recomp_register();                           /* register the lifted image once */
+        if (g_spu_out_mbox_hook != rd_spu_mbox_hook)     /* chain the runtime hook */
+            g_prev_out_mbox_hook = g_spu_out_mbox_hook;
         g_spu_out_mbox_hook = rd_spu_mbox_hook;
         g_spu_ready[id] = 1;
     }
@@ -218,6 +237,20 @@ void rd_hle_spu_mmio_read(ppu_context* ctx)
     uint32_t id  = (uint32_t)ctx->gpr[3];
     uint32_t off = (uint32_t)ctx->gpr[4];
     uint32_t r;
+    /* The raw SPU runs on an async host thread, so its out-mailbox may not be
+     * filled yet when the PPU polls. On real hardware the PPU spin-reads MBox_Stat
+     * until a value is available; our async timing means a single read can catch
+     * avail==0 and let the PPU proceed with stale state (the nondeterministic
+     * cParticleFluidLoadShader abort). Block the PPU here until the SPU produces a
+     * mailbox value (or stops) so the handshake is deterministic -- matching the
+     * PPU's own spin, just without the race window. Bounded so a genuinely idle
+     * SPU can't wedge the PPU forever. */
+    if (id < SPU_MAX && ((off & 0xFFFF) == 0x4004 || (off & 0xFFFF) == 0x4014)
+        && (g_out_mbox_wr[id] - g_out_mbox_rd[id]) <= 0 && g_spu_running[id]) {
+        for (int spins = 0; spins < 2000000 && g_spu_running[id]
+             && (g_out_mbox_wr[id] - g_out_mbox_rd[id]) <= 0; spins++)
+            YieldProcessor();
+    }
     long avail = (id < SPU_MAX) ? (g_out_mbox_wr[id] - g_out_mbox_rd[id]) : 0;
     if (avail < 0) avail = 0;
     switch (off & 0xFFFF) {
