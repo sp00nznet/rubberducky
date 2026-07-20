@@ -157,6 +157,24 @@ static void rd_run_spu(uint32_t id)
     ctx->status = SPU_STATUS_RUNNING;
     g_out_mbox_wr[id] = g_out_mbox_rd[id] = 0;
 
+    /* Default: run the raw SPU SYNCHRONOUSLY. It does its full init + ready-mailbox
+     * handshake, then parks (park_on_empty_inmbox) the first time it idle-polls the
+     * inbound mailbox -- deterministic, no async host thread racing the PPU (which
+     * caused the nondeterministic shader-load abort). The actual copies are HLE'd
+     * (rd_hle_jsasynccopy), so the parked worker needs to do nothing further.
+     * RD_SPU_ASYNC=1 restores the old async host-thread path. */
+    static int async = -1;
+    if (async < 0) { const char* e = getenv("RD_SPU_ASYNC"); async = (e && *e && *e != '0'); }
+    if (!async) {
+        ctx->park_on_empty_inmbox = 1;
+        if (rd_spu_trace()) fprintf(stderr, "[rd_spu] RUN id=%u entry=0x%X (sync-park)\n", id, ctx->pc);
+        spu_run_with_halt(spu_func_000000E0, ctx);
+        ctx->park_on_empty_inmbox = 0;
+        memcpy(vm_base + lsb, ctx->ls, SPU_LS_SIZE);
+        vm_write32(ps + 0x4024, (ctx->stop_code << 16) | ctx->status);
+        g_spu_running[id] = 0;
+        return;
+    }
     if (rd_spu_trace())
         fprintf(stderr, "[rd_spu] RUN id=%u entry=0x%X (async)\n", id, ctx->pc);
     CreateThread(NULL, 1u << 20, rd_spu_thread, (LPVOID)(uintptr_t)id, 0, NULL);
