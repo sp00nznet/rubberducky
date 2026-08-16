@@ -81,7 +81,14 @@ static void rd_spu_mbox_hook(uint32_t grp, uint32_t sid, uint32_t which, uint32_
      * (which==0) is a plain PPU-readable mailbox, NOT an event -- forwarding it
      * pushed spurious events onto q3/q5/q7 and made the game abort. Drop those. */
     if (sid >= SPU_MAX) {
-        if (which == 1 && g_prev_out_mbox_hook) g_prev_out_mbox_hook(grp, sid, which, val);
+        /* RD_MBOX_EVENTS=1 also forwards the plain WrOutMbox. The sim SPUs that
+         * complete via WrOutMbox alone (rbodycoll/isosurf1/hfluid write 0x3F and
+         * never touch the interrupt mailbox) otherwise never wake DuckApp::onUpdate,
+         * which blocks in sys_event_queue_receive on their connected queue. */
+        static int fwd0 = -1;
+        if (fwd0 < 0) fwd0 = getenv("RD_MBOX_EVENTS") ? 1 : 0;
+        if ((which == 1 || fwd0) && g_prev_out_mbox_hook)
+            g_prev_out_mbox_hook(grp, sid, which, val);
         return;
     }
     if (which != 0) return;                              /* which 0 = WrOutMbox */

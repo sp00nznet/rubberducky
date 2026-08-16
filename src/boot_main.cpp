@@ -230,6 +230,17 @@ static void dump_threads(const char* label, HMODULE self)
 {
     fprintf(stderr, "[WATCHDOG] %s; last HLE call = 0x%08X (%s)\n",
             label, g_last_hle_nid, g_last_hle_name ? g_last_hle_name : "");
+    /* Module range from the PE headers, so the per-address in-module test below
+     * is a range compare instead of a loader-lock-taking API call. */
+    const uint64_t self_lo = (uint64_t)self;
+    uint64_t self_hi = self_lo + 0x10000000ull;
+    {   const IMAGE_DOS_HEADER* dh = (const IMAGE_DOS_HEADER*)self;
+        if (dh->e_magic == IMAGE_DOS_SIGNATURE) {
+            const IMAGE_NT_HEADERS* nh =
+                (const IMAGE_NT_HEADERS*)((const char*)self + dh->e_lfanew);
+            if (nh->Signature == IMAGE_NT_SIGNATURE)
+                self_hi = self_lo + nh->OptionalHeader.SizeOfImage;
+        } }
     DWORD me = GetCurrentThreadId(), pid = GetCurrentProcessId();
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     THREADENTRY32 te; te.dwSize = sizeof te;
@@ -239,59 +250,61 @@ static void dump_threads(const char* label, HMODULE self)
             HANDLE th = OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME,
                                    FALSE, te.th32ThreadID);
             if (!th) continue;
+            /* NOTHING that can take a process-wide lock may run while the target
+             * is SUSPENDED: fprintf takes the CRT stdio lock and
+             * GetModuleHandleExA takes the loader lock, so if the suspended
+             * thread happened to hold either, the watchdog deadlocks AND never
+             * resumes it -- freezing the process it was meant to diagnose.
+             * Capture raw values here, resume, then symbolize and print. */
+            uint64_t rip = 0, rvas[20]; int nrva = 0; bool got = false;
             SuspendThread(th);
             CONTEXT ctx; ctx.ContextFlags = CONTEXT_CONTROL;
-            if (GetThreadContext(th, &ctx)) {
-                HMODULE m = NULL;
-                GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                   (LPCSTR)ctx.Rip, &m);
-                if (m == self) {
+            if ((got = !!GetThreadContext(th, &ctx))) {
+                rip = ctx.Rip;
+                /* Scan the suspended thread's stack for boot-module return
+                 * addresses to reconstruct the lifted call chain — done for ALL
+                 * threads (even when RIP is parked in ntdll inside a CriticalSection
+                 * call), since that's exactly where the busy-spin's lwmutex churn
+                 * lands the main thread. Map RVAs -> func_ names via symrva.py.
+                 * (some false positives expected — these are stack-scan hits.)
+                 * The in-module test is a plain range compare against the PE's
+                 * SizeOfImage: no API call, so no loader lock. */
+                uint64_t* sp = (uint64_t*)ctx.Rsp;
+                /* Bound the scan to the committed stack region so we never read
+                 * past the guard page (VirtualQuery gives this region's end;
+                 * it takes no lock the suspended thread could be holding). */
+                MEMORY_BASIC_INFORMATION mbi;
+                uint64_t region_end = (uint64_t)sp + 0x8000;
+                if (VirtualQuery((LPCVOID)sp, &mbi, sizeof mbi))
+                    region_end = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
+                int maxk = (int)((region_end - (uint64_t)sp) / 8);
+                if (maxk > 0x20000 / 8) maxk = 0x20000 / 8;
+                for (int k = 0; k < maxk && nrva < 20; k++) {
+                    uint64_t v = sp[k];
+                    if (v >= self_lo && v < self_hi) rvas[nrva++] = v - self_lo;
+                }
+            }
+            ResumeThread(th);
+            CloseHandle(th);
+            if (got) {
+                if (rip >= self_lo && rip < self_hi) {
                     fprintf(stderr, "[WATCHDOG]   tid %5lu BOOT rip rva=0x%llX\n",
                             (unsigned long)te.th32ThreadID,
-                            (unsigned long long)((char*)ctx.Rip - (char*)self));
+                            (unsigned long long)(rip - self_lo));
                 } else {
-                    char path[MAX_PATH] = "?";
+                    HMODULE m = NULL; char path[MAX_PATH] = "?";
+                    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                       (LPCSTR)rip, &m);
                     if (m) GetModuleFileNameA(m, path, sizeof path);
                     const char* base = strrchr(path, '\\');
                     fprintf(stderr, "[WATCHDOG]   tid %5lu in %s\n",
                             (unsigned long)te.th32ThreadID, base ? base + 1 : path);
                 }
-                /* Scan the suspended thread's stack for boot-module return
-                 * addresses to reconstruct the lifted call chain — done for ALL
-                 * threads (even when RIP is parked in ntdll inside a CriticalSection
-                 * call), since that's exactly where the busy-spin's lwmutex churn
-                 * lands the main thread. Map RVAs -> func_ names via flow.map.
-                 * (some false positives expected — these are stack-scan hits.) */
-                {
-                    uint64_t* sp = (uint64_t*)ctx.Rsp;
-                    /* Bound the scan to the committed stack region so we never read
-                     * past the guard page (VirtualQuery gives this region's end). */
-                    MEMORY_BASIC_INFORMATION mbi;
-                    uint64_t region_end = (uint64_t)sp + 0x8000;
-                    if (VirtualQuery((LPCVOID)sp, &mbi, sizeof mbi))
-                        region_end = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
-                    int maxk = (int)((region_end - (uint64_t)sp) / 8);
-                    if (maxk > 0x20000 / 8) maxk = 0x20000 / 8;
-                    int found = 0;
-                    for (int k = 0; k < maxk && found < 20; k++) {
-                        uint64_t v = sp[k];
-                        if (v < (uint64_t)self) continue;
-                        HMODULE mm = NULL;
-                        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                           (LPCSTR)v, &mm);
-                        if (mm == self) {
-                            fprintf(stderr, "[WATCHDOG]       tid %5lu ret rva=0x%llX\n",
-                                    (unsigned long)te.th32ThreadID,
-                                    (unsigned long long)(v - (uint64_t)self));
-                            found++;
-                        }
-                    }
-                }
+                for (int k = 0; k < nrva; k++)
+                    fprintf(stderr, "[WATCHDOG]       tid %5lu ret rva=0x%llX\n",
+                            (unsigned long)te.th32ThreadID, (unsigned long long)rvas[k]);
             }
-            ResumeThread(th);
-            CloseHandle(th);
         } while (Thread32Next(snap, &te));
     }
     if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
@@ -304,11 +317,18 @@ static DWORD WINAPI hang_watchdog(LPVOID)
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        (LPCSTR)&hang_watchdog, &self);
-    Sleep(8000);
-    dump_threads("8s sample", self);
-    Sleep(7000);
-    dump_threads("15s sample", self);
-    return 0;
+    /* Keep sampling: the two-shot version could only ever see the first 15s, so
+     * a wedge later in the boot (the cviewer scene load) was never captured.
+     * RD_WATCHDOG_SECS=0 disables; default is a sample every 20s. */
+    const char* e = getenv("RD_WATCHDOG_SECS");
+    int period = e ? atoi(e) : 20;
+    if (period <= 0) return 0;
+    for (int n = 1; ; n++) {
+        Sleep((DWORD)period * 1000);
+        char label[32];
+        snprintf(label, sizeof label, "%ds sample", n * period);
+        dump_threads(label, self);
+    }
 }
 #endif
 
