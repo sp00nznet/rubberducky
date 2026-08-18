@@ -37,6 +37,7 @@
 extern "C" uint8_t* vm_base;
 extern "C" {
     int  spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx);
+    uint32_t spu_interp_run(spu_context* ctx, uint32_t start_lsa);
     /* SPU->PPU outbound-mailbox delivery hook (runtime/spu/spu_channels.c). */
     extern void (*g_spu_out_mbox_hook)(uint32_t group_id, uint32_t spu_id,
                                        uint32_t which, uint32_t value);
@@ -175,7 +176,19 @@ static void rd_run_spu(uint32_t id)
     if (!async) {
         ctx->park_on_empty_inmbox = 1;
         if (rd_spu_trace()) fprintf(stderr, "[rd_spu] RUN id=%u entry=0x%X (sync-park)\n", id, ctx->pc);
-        spu_run_with_halt(spu_func_000000E0, ctx);
+        /* RD_SPU_RAW_INTERP=1: interpret the raw SPU instead of running its
+         * LIFTED image. The AsyncCopy bypass exists because the lifted program
+         * infinite-loops on an r1 drift across a tail-call chain -- a spu_lifter
+         * frame bug, not an SPU-semantics one -- so the interpreter, which keeps
+         * r1 in the context, should not hit it. That matters because the real
+         * copy is what computes the destination and issues the MFC DMAs; the
+         * host-memcpy bypass only moves the bytes the PPU names. */
+        {
+            static int rawi = -1;
+            if (rawi < 0) { const char* e = getenv("RD_SPU_RAW_INTERP"); rawi = (e && *e && *e != '0'); }
+            if (rawi) spu_interp_run(ctx, ctx->pc);
+            else      spu_run_with_halt(spu_func_000000E0, ctx);
+        }
         ctx->park_on_empty_inmbox = 0;
         memcpy(vm_base + lsb, ctx->ls, SPU_LS_SIZE);
         vm_write32(ps + 0x4024, (ctx->stop_code << 16) | ctx->status);
@@ -208,11 +221,21 @@ static void rd_mfc_dma(uint32_t id, uint32_t opcode)
     int is_put  = (cmd & 0x20) != 0;   /* PUT* = LS -> main */
     int is_list = (cmd & 0x04) != 0;   /* GETL/PUTL: DMA list in LS (unhandled) */
 
-    if (g_dma_count < 30)
+    { static int cap = -1;
+      if (cap < 0) { const char* e = getenv("RD_DMA_DBG"); cap = e ? atoi(e) : 30; }
+      if ((int)g_dma_count < cap)
         fprintf(stderr, "[rd_spu] DMA#%u id=%u cmd=0x%02X %s ls=0x%08X ea=0x%08X size=%u%s\n",
                 g_dma_count, id, cmd, is_get ? "GET" : is_put ? "PUT" : "?",
-                ls, ea, size, is_list ? " [LIST!]" : "");
+                ls, ea, size, is_list ? " [LIST!]" : ""); }
     g_dma_count++;
+    /* Count what gets dropped below: a texture upload is exactly the shape that
+     * does -- a DMA LIST, or a transfer past the single-DMA cap. */
+    { static uint32_t n_list = 0, n_big = 0, n_ok = 0;
+      if (is_list) n_list++; else if (size > 0x4000) n_big++; else n_ok++;
+      static int rep = -1; if (rep < 0) rep = getenv("RD_DMA_DBG") ? 1 : 0;
+      if (rep && ((n_list + n_big + n_ok) % 500) == 0)
+          fprintf(stderr, "[rd_spu] DMA totals: executed=%u dropped-list=%u dropped-oversize=%u\n",
+                  n_ok, n_list, n_big); }
 
     if (!vm_base || size == 0 || size > 0x4000) return;   /* MFC single-DMA <= 16 KB */
     if (is_list) return;                                  /* TODO if the demo needs it */
@@ -325,6 +348,14 @@ void rd_hle_jsasynccopy(ppu_context* ctx)      /* _jsAsyncCopy(dst, src, size) *
     uint32_t size = (uint32_t)ctx->gpr[5];
     if (vm_base && size && size < 0x10000000u)
         memcpy(vm_base + dst, vm_base + src, size);
+    { static int cap = -1, n = 0;
+      if (cap < 0) { const char* e = getenv("RD_COPY_DBG"); cap = e ? atoi(e) : 0; }
+      if (cap && n < cap) { n++;
+        uint32_t nz = 0;
+        for (uint32_t i = 0; vm_base && i < size && i < 0x4000u; i += 37)
+            if (vm_base[dst + i]) nz++;
+        fprintf(stderr, "[RDCOPY] dst=0x%08X src=0x%08X size=0x%X  dst-nonzero=%u/%u\n",
+                dst, src, size, nz, (size < 0x4000u ? size : 0x4000u) / 37 + 1); } }
     ctx->gpr[3] = 0;
 }
 

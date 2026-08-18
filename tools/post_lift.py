@@ -40,6 +40,15 @@ ALLOC_PATCHES = {
     "00067EC0": ("rd_hle_jsasynccopyfinish", "_jsAsyncCopyFinish"),
 }
 
+# RD_KEEP_ASYNCCOPY=1: leave _jsAsyncCopy/_jsAsyncCopyFinish as LIFTED GUEST
+# CODE so the real raw-SPU copy path runs. The host-memcpy bypass was added when
+# the SPU could not execute at all; it moves the bytes the PPU passes but not
+# the placement/swizzle the SPU program performs, and every sampled texture
+# reads back zero. With the SPU interpreter working this is worth re-testing.
+if os.environ.get("RD_KEEP_ASYNCCOPY"):
+    for _a in ("00068170", "00067EC0"):
+        ALLOC_PATCHES.pop(_a, None)
+
 
 # ---------------------------------------------------------------------------
 # Nonvolatile-register / caller-frame preservation around the PSGL device and

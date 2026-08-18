@@ -126,3 +126,15 @@ void rd_hle_memset(ppu_context* ctx)
 void rd_hle_unwind_resume(ppu_context* ctx) { (void)ctx; }
 
 
+
+/* memcpy (guest 0x00384374) -> host memmove. Kept because the lifted tree in
+ * this working copy was generated with the redirect in place; behaviourally
+ * identical to the guest routine. */
+void rd_hle_memcpy(ppu_context* ctx)
+{
+    uint32_t dst = (uint32_t)ctx->gpr[3];
+    uint32_t src = (uint32_t)ctx->gpr[4];
+    uint32_t n   = (uint32_t)ctx->gpr[5];
+    if (vm_base && n) memmove(vm_base + dst, vm_base + src, n);
+    ctx->gpr[3] = dst;
+}
