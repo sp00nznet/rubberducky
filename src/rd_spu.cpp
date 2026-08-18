@@ -228,7 +228,12 @@ static void rd_mfc_dma(uint32_t id, uint32_t opcode)
     uint32_t eah = vm_read32(ps + 0x3008);
     uint32_t eal = vm_read32(ps + 0x300C);
     uint32_t szt = vm_read32(ps + 0x3010);
-    uint32_t size = szt & 0xFFFF;
+    /* MFC_Size_Tag packs SIZE in bits [31:16] and the tag group in [15:0].
+     * Reading size from the low half moved 0x1F bytes where the guest asked for
+     * 0x1040 -- every proxy DMA truncated to a few dozen bytes, so the raw SPU's
+     * program never arrived in its local store (it then stopped on its first
+     * instruction with code 0) and no texture upload ever completed. */
+    uint32_t size = (szt >> 16) & 0xFFFF;
     uint32_t cmd  = opcode & 0xFF;
 
     /* EA is 32-bit in this title (eah == 0); keep the low 32 as the guest addr. */
