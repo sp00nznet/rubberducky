@@ -369,6 +369,19 @@ void rd_hle_jsasynccopy(ppu_context* ctx)      /* _jsAsyncCopy(dst, src, size) *
     uint32_t dst  = (uint32_t)ctx->gpr[3];
     uint32_t src  = (uint32_t)ctx->gpr[4];
     uint32_t size = (uint32_t)ctx->gpr[5];
+    /* RD_COPY_ORDER=<N>: which register is really the DESTINATION? The bypass
+     * assumes _jsAsyncCopy(dst, src, size) from r3/r4/r5. If that is backwards we
+     * have been copying empty memory OVER the real image every time, which looks
+     * exactly like "the upload never happened". Sample both sides BEFORE the copy
+     * and report which one currently holds data. */
+    { static int cap = -1, k = 0;
+      if (cap < 0) { const char* e = getenv("RD_COPY_ORDER"); cap = e ? atoi(e) : 0; }
+      if (cap && k < cap && vm_base && size >= 0x400) { k++;
+        uint32_t nd = 0, ns = 0, t = 0;
+        for (uint32_t i2 = 0; i2 < size && i2 < 0x4000u; i2 += 37) {
+            t++; if (vm_base[dst + i2]) nd++; if (vm_base[src + i2]) ns++; }
+        fprintf(stderr, "[RDORDER] r3=0x%08X(nz %u/%u)  r4=0x%08X(nz %u/%u)  size=0x%X%c",
+                dst, nd, t, src, ns, t, size, 10); } }
     if (vm_base && size && size < 0x10000000u)
         memcpy(vm_base + dst, vm_base + src, size);
     { static int cap = -1, n = 0;
