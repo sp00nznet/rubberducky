@@ -395,6 +395,25 @@ void rd_hle_jsasynccopy(ppu_context* ctx)      /* _jsAsyncCopy(dst, src, size) *
     ctx->gpr[3] = 0;
 }
 
+/* _jsAsyncCopyExec(dst, src, size, ...) -- the worker _jsAsyncCopy forwards to.
+ * Intercepting only the wrapper leaves any caller that reaches the worker
+ * DIRECTLY on the real raw-SPU path, which cannot run here; PSGL's texture
+ * upload is the suspected such caller, and its destination VRAM is exactly what
+ * never gets written. Same host copy as the wrapper. */
+void rd_hle_jsasynccopyexec(ppu_context* ctx)
+{
+    uint32_t dst  = (uint32_t)ctx->gpr[3];
+    uint32_t src  = (uint32_t)ctx->gpr[4];
+    uint32_t size = (uint32_t)ctx->gpr[5];
+    if (vm_base && size && size < 0x10000000u)
+        memcpy(vm_base + dst, vm_base + src, size);
+    { static int cap = -1, k = 0;
+      if (cap < 0) { const char* e = getenv("RD_COPY_DBG"); cap = e ? atoi(e) : 0; }
+      if (cap && k < cap) { k++;
+        fprintf(stderr, "[RDEXEC] dst=0x%08X src=0x%08X size=0x%X%c", dst, src, size, 10); } }
+    ctx->gpr[3] = 0;
+}
+
 void rd_hle_jsasynccopyfinish(ppu_context* ctx) /* _jsAsyncCopyFinish() -> already done */
 {
     ctx->gpr[3] = 0;

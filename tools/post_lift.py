@@ -37,6 +37,7 @@ ALLOC_PATCHES = {
     # jsGcm AsyncCopy -> synchronous host memcpy, bypassing the buggy raw-SPU
     # copy loop that hangs the texture upload (src/rd_spu.cpp)
     "00068170": ("rd_hle_jsasynccopy",       "_jsAsyncCopy"),
+    "00067B40": ("rd_hle_jsasynccopyexec",   "_jsAsyncCopyExec"),
     "00067EC0": ("rd_hle_jsasynccopyfinish", "_jsAsyncCopyFinish"),
 }
 
