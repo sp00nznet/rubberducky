@@ -165,8 +165,19 @@ static void rd_run_spu(uint32_t id)
 
     memset(ctx->ls, 0, SPU_LS_SIZE);
     rd_spu_load_image(ctx, SPU0004_GUEST_ELF);            /* code + constants + defaults */
-    memcpy(ctx->ls + 0x80,   vm_base + lsb + 0x80,   0x60);
-    memcpy(ctx->ls + 0x1100, vm_base + lsb + 0x1100, 0x80);
+    /* RD_SPU_LS_FROM_VM=1: take the WHOLE local store from the flat VM instead
+     * of the two known parameter blocks. When the guest runs its real loader
+     * (RD_KEEP_ASYNCCOPY=1) it DMAs the SPU program into the raw SPU's LS
+     * window itself, so the hardcoded .spu_image copy above can be stale --
+     * which shows up as the SPU stopping with code 0 on its first instruction
+     * (an empty LS decodes as `stop 0`). */
+    { static int fromvm = -1;
+      if (fromvm < 0) { const char* e = getenv("RD_SPU_LS_FROM_VM"); fromvm = (e && *e && *e != '0'); }
+      if (fromvm) memcpy(ctx->ls, vm_base + lsb, SPU_LS_SIZE);
+      else {
+        memcpy(ctx->ls + 0x80,   vm_base + lsb + 0x80,   0x60);
+        memcpy(ctx->ls + 0x1100, vm_base + lsb + 0x1100, 0x80);
+      } }
 
     ctx->pc = vm_read32(ps + 0x4034);                    /* NPC */
     ctx->status = SPU_STATUS_RUNNING;
