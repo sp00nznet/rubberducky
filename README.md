@@ -342,3 +342,35 @@ This project contains no proprietary Sony code, game binaries, encryption keys, 
 ---
 
 *"Wait and press &lt;START&gt; to start the demo."*
+
+### Texture upload — where it actually breaks (2026-08-17)
+
+The demo renders its geometry (correct depth/perspective/shading) but every
+material is flat colour: all 69 texture-slot uploads per run read from all-zero
+guest memory. Findings, so this is not re-derived:
+
+- The bound offsets are genuinely VRAM. `SET_TEXTURE_FORMAT` says DMA class 1
+  (LOCAL), the IO table has no mapping for those pages, and `SET_TEXTURE_OFFSET`
+  carries values like `0x010D9B00`.
+- **Nothing ever writes those addresses.** Not the raw-SPU AsyncCopy (3524 calls
+  traced; 3195 main->main mip building, 329 main->VRAM, none covering a bound
+  texture), not guest `memcpy` (stack only), not NV308A inline transfer, not
+  NV3089 (now implemented upstream — its blits here are 16-32px rows in the
+  first 16KB of VRAM), and the demo imports no `cellGcmSetTransfer*` at all.
+- The FIFO is fully accounted for: subch 0 = 3D, 2/3 + 4/5 + 6/7 handled. So the
+  upload does not come through the FIFO. The only remaining actor is the raw
+  AsyncCopy SPU, which the port bypasses with a host memcpy.
+- **The bypass cannot simply be removed.** With `RD_KEEP_ASYNCCOPY=1` the boot
+  hangs in `_jsAsyncCopyInit` <- `_jsPlatformInit` <- `psglInit` <- `FWCellGLWindow`
+  ctor, right after the D3D12 backend comes up and long before any texture work.
+  The SPU is never started (RunCntl is never written; 2 proxy DMAs total), so the
+  PPU polls for a completion that cannot arrive. This is a PPU-side init hang, NOT
+  the "buggy raw-SPU copy loop" the v0.18 notes describe.
+- Neither engine nor threading model changes that: `RD_SPU_RAW_INTERP=1`
+  (interpret rather than run the lifted image, sidestepping the spu_lifter r1
+  drift) and `RD_SPU_ASYNC=1` (own host thread, so a blocking `rdch SPU_RdInMbox`
+  is legal) both hang at the same point, together and separately.
+
+Next: debug `_jsAsyncCopyInit` (guest 0x00068230) — it is symbol-named, and the
+periodic watchdog + `tools/symrva.py` resolve its spin directly. Getting that
+handshake to complete is what unblocks the real copy path, and with it textures.
