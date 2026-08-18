@@ -127,7 +127,14 @@ static DWORD WINAPI rd_spu_thread(LPVOID p)
 {
     uint32_t id = (uint32_t)(uintptr_t)p;
     spu_context* ctx = &g_spu_ctx[id];
-    spu_run_with_halt(spu_func_000000E0, ctx);           /* spu_0004 entry = 0xE0 */
+    /* Same engine choice as the synchronous path (RD_SPU_RAW_INTERP). On its own
+     * thread a blocking `rdch SPU_RdInMbox` is correct -- the SPU waits for the
+     * next command while the PPU runs on -- which is exactly what the raw
+     * AsyncCopy worker expects and what the synchronous run cannot provide. */
+    { static int rawi = -1;
+      if (rawi < 0) { const char* e = getenv("RD_SPU_RAW_INTERP"); rawi = (e && *e && *e != '0'); }
+      if (rawi) spu_interp_run(ctx, ctx->pc);
+      else      spu_run_with_halt(spu_func_000000E0, ctx); }   /* spu_0004 entry = 0xE0 */
     uint32_t ps  = RAW_SPU_PS_BASE + id * RAW_SPU_STRIDE;
     uint32_t lsb = RAW_SPU_LS_BASE + id * RAW_SPU_STRIDE;
     memcpy(vm_base + lsb, ctx->ls, SPU_LS_SIZE);          /* mirror final LS back */
