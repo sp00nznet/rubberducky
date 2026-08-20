@@ -38,6 +38,8 @@ extern "C" uint8_t* vm_base;
 extern "C" {
     int  spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx);
     uint32_t spu_interp_run(spu_context* ctx, uint32_t start_lsa);
+    /* RSX VRAM upload registry (libs/video/cellGcmSys.c) — see TEX_REMAP. */
+    void rsx_note_vram_upload(uint32_t dst_ea, uint32_t size);
     /* SPU->PPU outbound-mailbox delivery hook (runtime/spu/spu_channels.c). */
     extern void (*g_spu_out_mbox_hook)(uint32_t group_id, uint32_t spu_id,
                                        uint32_t which, uint32_t value);
@@ -384,6 +386,11 @@ void rd_hle_jsasynccopy(ppu_context* ctx)      /* _jsAsyncCopy(dst, src, size) *
                 dst, nd, t, src, ns, t, size, 10); } }
     if (vm_base && size && size < 0x10000000u)
         memcpy(vm_base + dst, vm_base + src, size);
+    /* Tell the RSX layer what landed in VRAM, so a texture whose bound offset
+     * does not match its upload can still be found (see TEX_REMAP). */
+    if (dst >= 0xC0000000u && dst < 0xD0000000u) {
+        rsx_note_vram_upload(dst, size);
+    }
     { static int cap = -1, n = 0;
       if (cap < 0) { const char* e = getenv("RD_COPY_DBG"); cap = e ? atoi(e) : 0; }
       if (cap && n < cap) { n++;
@@ -407,6 +414,11 @@ void rd_hle_jsasynccopyexec(ppu_context* ctx)
     uint32_t size = (uint32_t)ctx->gpr[5];
     if (vm_base && size && size < 0x10000000u)
         memcpy(vm_base + dst, vm_base + src, size);
+    /* Tell the RSX layer what landed in VRAM, so a texture whose bound offset
+     * does not match its upload can still be found (see TEX_REMAP). */
+    if (dst >= 0xC0000000u && dst < 0xD0000000u) {
+        rsx_note_vram_upload(dst, size);
+    }
     { static int cap = -1, k = 0;
       if (cap < 0) { const char* e = getenv("RD_COPY_DBG"); cap = e ? atoi(e) : 0; }
       if (cap && k < cap) { k++;

@@ -17,6 +17,7 @@
  * for a demo; if a long run OOMs, promote to a real free-list allocator.
  * ponytail: bump-only, no free; real allocator only if a run actually OOMs.
  */
+#include <stdlib.h>
 #include "ppu_recomp.h"
 #include <cstdio>
 #include <cstring>
@@ -123,7 +124,21 @@ void rd_hle_memset(ppu_context* ctx)
  * ponytail: neutralizes a spurious lift-EH unwind; the real fix is landing-pad
  * control flow in spu_lifter/ppu_lifter. Safe here because the title never
  * raises a real C++ exception (confirmed by the EH-entrypoint taps). */
-void rd_hle_unwind_resume(ppu_context* ctx) { (void)ctx; }
+/* _Unwind_Resume is a no-op here, but every call to it marks a lifted function
+ * taking a CLEANUP path. The lifter has a known spurious-exception bug (see the
+ * SpuPrintfServer::initialize patch in tools/post_lift.py), and a function that
+ * bails into cleanup skips whatever it was supposed to do -- which is exactly
+ * the shape of "the fluid's particle buffers are never populated".
+ * RD_UNWIND_DBG=1 reports the first calls with the return address. */
+void rd_hle_unwind_resume(ppu_context* ctx)
+{
+    static int dbg = -1;
+    if (dbg < 0) { const char* e = getenv("RD_UNWIND_DBG"); dbg = (e && *e && *e != 0x30) ? 1 : 0; }
+    if (dbg) { static int n = 0; if (n++ < 24)
+        fprintf(stderr, "[unwind] _Unwind_Resume #%d lr=0x%08X r3=0x%08X%c",
+                n, (unsigned)ctx->lr, (unsigned)ctx->gpr[3], 10); }
+    (void)ctx;
+}
 
 
 
